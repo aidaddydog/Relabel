@@ -14,64 +14,15 @@ from sqlalchemy import text, create_engine, Column, String, Integer, Boolean, Da
 from sqlalchemy.orm import sessionmaker, declarative_base
 from .print_ext import init_print_ext as _init_print_ext_197
 
-from passlib.hash
-# ---- 口令哈希（重构为 Argon2id + Pepper）----
-import hmac, secrets
+from passlib.hash import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256
 
-def _pepper_bytes() -> bytes:
-    """
-    读取 Pepper（优先从文件，其次环境变量）。不存在时返回空字节（仅用于兼容旧哈希验证）。
-    - HUANDAN_PEPPER_FILE=/etc/huandan/secret_pepper
-    - HUANDAN_PEPPER=hex 或 原始文本
-    """
-    pfile = os.environ.get("HUANDAN_PEPPER_FILE", "").strip()
-    if pfile and os.path.exists(pfile):
-        try:
-            data = open(pfile, "rb").read().strip()
-            return data
-        except Exception:
-            pass
-    val = os.environ.get("HUANDAN_PEPPER", "").strip()
-    if not val:
-        return b""
-    try:
-        # 尝试把 hex 解析为 bytes
-        return bytes.fromhex(val)
-    except Exception:
-        return val.encode("utf-8")
-
-# Argon2id 参数：time_cost(rounds)、memory_cost(KiB)、parallelism
-_ARGON2 = _argon2.using(type="ID", rounds=3, memory_cost=65536, parallelism=2)
-
-def _hmac_sha256(pepr: bytes, pw: str) -> str:
-    return hmac.new(pepr, pw.encode("utf-8"), hashlib.sha256).hexdigest()
-
+# ---- 密码哈希兼容层 ----
+# 使用 bcrypt_sha256 以避免 72 字节限制，同时兼容历史上用 bcrypt 生成的散列。
 def _hash_password(pw: str) -> str:
-    """
-    新增：Argon2id( HMAC(pepper, password) )
-    兼容：若 pepper 缺失，仅用于开发/兼容（强烈建议部署脚本生成 pepper）
-    """
-    pepr = _pepper_bytes()
-    payload = _hmac_sha256(pepr, pw) if pepr else pw
-    return _ARGON2.hash(payload)
-
-def _is_argon2_hash(h: str) -> bool:
-    return isinstance(h, str) and h.startswith("$argon2")
+    return _bcrypt_sha256.hash(pw)
 
 def _verify_password(pw: str, hh: str) -> bool:
-    """
-    验证顺序：
-    1) 如果是 Argon2 散列：按 Argon2id + pepper 验证
-    2) 回退验证 bcrypt_sha256、bcrypt（历史散列）
-    """
-    try:
-        if _is_argon2_hash(hh):
-            pepr = _pepper_bytes()
-            payload = _hmac_sha256(pepr, pw) if pepr else pw
-            return _ARGON2.verify(payload, hh)
-    except Exception:
-        pass
-    # 兼容旧散列
+    # 先按 bcrypt_sha256 校验，失败后再回退到老的 bcrypt
     try:
         return _bcrypt_sha256.verify(pw, hh)
     except Exception:
@@ -79,16 +30,6 @@ def _verify_password(pw: str, hh: str) -> bool:
             return _bcrypt_legacy.verify(pw, hh)
         except Exception:
             return False
-
-def _needs_rehash(hh: str) -> bool:
-    """非 Argon2 或 Argon2 参数变化时需要再哈希。"""
-    try:
-        if not _is_argon2_hash(hh):
-            return True
-        return _ARGON2.needs_update(hh)
-    except Exception:
-        return True
- import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256, argon2 as _argon2
 
 import pandas as pd
 
@@ -413,7 +354,7 @@ def login_page(request: Request, db=Depends(get_db)):
     # 若尚无管理员，跳转到初始化页面
     try:
         if db.query(AdminUser).count() == 0:
-            return RedirectResponse("/admin/login", status_code=302)
+            return RedirectResponse("/admin/bootstrap", status_code=302)
     except Exception:
         pass
     return templates.TemplateResponse("login.html", {"request": request})
@@ -437,6 +378,34 @@ def require_admin(request: Request, db):
     return
 
 # 首次初始化管理员（仍保留）
+@app.get("/admin/bootstrap", response_class=HTMLResponse)
+def bootstrap_page(request: Request, db=Depends(get_db)):
+    has = db.query(AdminUser).count()
+    if has > 0: return RedirectResponse("/admin/login", status_code=302)
+    return templates.TemplateResponse("bootstrap.html", {"request": request})
+
+@app.post("/admin/bootstrap")
+def bootstrap_do(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
+    has = db.query(AdminUser).count()
+    if has > 0:
+        return RedirectResponse("/admin/login", status_code=302)
+    error = None
+    try:
+        if not username or not password:
+            error = "用户名和密码不能为空"
+        elif len(username) > 64:
+            error = "用户名过长（最多64个字符）"
+        elif db.query(AdminUser).filter(AdminUser.username==username).first():
+            error = "该用户名已存在"
+        else:
+            db.add(AdminUser(username=username, password_hash=_hash_password(password), is_active=True))
+            db.commit()
+            return RedirectResponse("/admin/login", status_code=302)
+    except Exception as e:
+        db.rollback()
+        error = f"初始化失败：{e}"
+    return templates.TemplateResponse("bootstrap.html", {"request": request, "error": error}, status_code=400)
+
 
 @app.get("/admin", response_class=HTMLResponse)
 def dashboard(request: Request, db=Depends(get_db)):
@@ -738,20 +707,183 @@ def api_apply_pdf_import(request: Request, tmp: str = Query(...), db=Depends(get
 
 # ------------------ 文件/订单列表与批量操作 ------------------
 @app.get("/admin/files", response_class=HTMLResponse)
-def list_files(request: Request, q: Optional[str]=None, status: Optional[str]=None, client: Optional[str]=None, page: int=1, db=Depends(get_db)):
+def list_files(request: Request,
+               q: Optional[str]=None,
+               status: Optional[str]=None,
+               client: Optional[str]=None,
+               bind: Optional[str]=None,  # 'bound' | 'unbound' | None
+               page: int=1,
+               db=Depends(get_db)):
+    """
+    文件（PDF）列表：
+    - 列：# | PDF（导出名） | 订单号 | 上传时间 | 打印状态 | 打印次数 | 打印客户端名称 | 操作
+    - 筛选：q/status/client/bind
+    - 绑定判定：优先 order_mapping，其次 print_events 最近一次记录（仅用于展示与筛选，主表字段不写回）
+    """
     require_admin(request, db); cleanup_expired(db)
-    page_size=100
-    query = db.query(TrackingFile)
+    page_size = 100
+
+    # 基础过滤（不含绑定状态）
+    base_q = db.query(TrackingFile)
     if q:
-        query = query.filter(TrackingFile.tracking_no.like(f"%{q}%"))
+        base_q = base_q.filter(TrackingFile.tracking_no.like(f"%{q}%"))
     if status:
-        query = query.filter(TrackingFile.print_status == status)
+        base_q = base_q.filter(TrackingFile.print_status == status)
     if client:
-        query = query.filter(TrackingFile.last_print_client_name.like(f"%{client}%"))
-    total = query.count()
-    rows = query.order_by(TrackingFile.uploaded_at.desc()).offset((page-1)*page_size).limit(page_size).all()
-    pages = max(1, math.ceil(total/page_size))
-    return templates.TemplateResponse("files.html", {"request": request, "rows": rows, "q": q, "status": status, "client": client, "page": page, "pages": pages, "total": total, "page_size": page_size})
+        base_q = base_q.filter(TrackingFile.last_print_client_name.like(f"%{client}%"))
+
+    # 先拿出候选 tracking_no（用于绑定态判断与分页）
+    cands = [r[0] for r in base_q.with_entities(TrackingFile.tracking_no).order_by(TrackingFile.uploaded_at.desc()).all()]
+
+    # 计算“已绑定”集合：order_mapping + print_events（有 order_id）
+    bound_set = set()
+    if cands:
+        # order_mapping
+        rows = db.execute(text("SELECT tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(tracking_no,'')<>''"),
+                          {"tn": tuple(cands)}).fetchall()
+        bound_set.update([r[0] for r in rows if r and r[0]])
+        # print_events（最近一次是否有 order_id 即视为绑定）
+        rows = db.execute(text("SELECT tracking_no FROM print_events WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' GROUP BY tracking_no"),
+                          {"tn": tuple(cands)}).fetchall()
+        bound_set.update([r[0] for r in rows if r and r[0]])
+
+    # 应用绑定筛选
+    if bind == "bound":
+        filtered = [tn for tn in cands if tn in bound_set]
+    elif bind == "unbound":
+        filtered = [tn for tn in cands if tn not in bound_set]
+    else:
+        filtered = cands
+
+    total = len(filtered)
+    pages = max(1, math.ceil(total / page_size))
+    page = max(1, min(pages, int(page or 1)))
+    start_idx = (page - 1) * page_size
+    page_tns = filtered[start_idx : start_idx + page_size]
+
+    # 取本页行
+    rows = []
+    if page_tns:
+        rows = db.query(TrackingFile).filter(TrackingFile.tracking_no.in_(page_tns)).order_by(TrackingFile.uploaded_at.desc()).all()
+
+    # 计算显示所需的“绑定订单号/中文状态/重印原因”
+    extras = {}
+    if page_tns:
+        # 订单号（优先 order_mapping，缺省再从 print_events 最近一次取）
+        # order_mapping
+        mm = {}
+        rs = db.execute(text("SELECT order_id, tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' ORDER BY updated_at DESC"),
+                        {"tn": tuple(page_tns)}).fetchall()
+        for oid, tn in rs:
+            if tn and tn not in mm:
+                mm[tn] = oid
+        # print_events 补洞
+        rs2 = db.execute(text("SELECT tracking_no, order_id FROM print_events WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' ORDER BY created_at DESC"),
+                         {"tn": tuple(page_tns)}).fetchall()
+        for tn, oid in rs2:
+            if tn and tn not in mm and oid:
+                mm[tn] = oid
+
+        # 重印原因（最近一次）
+        rmap = {}
+        rs3 = db.execute(text("SELECT tracking_no, reprint_reason FROM print_events WHERE tracking_no IN :tn AND result='success_reprint' AND ifnull(reprint_reason,'')<>'' ORDER BY created_at DESC"),
+                         {"tn": tuple(page_tns)}).fetchall()
+        for tn, reason in rs3:
+            if tn and tn not in rmap:
+                rmap[tn] = reason
+
+        # 中文状态
+        cn = {"not_printed":"未打印","printed":"已打印","reprinted":"重复打印"}
+
+        for tn in page_tns:
+            extras[tn] = {
+                "order_id": mm.get(tn, ""),
+                "reprint_reason": rmap.get(tn, ""),
+                "status_cn": cn.get(next((r.print_status for r in rows if r.tracking_no==tn), "not_printed"), "未打印")
+            }
+
+    return templates.TemplateResponse("files.html", {
+
+@app.get("/admin/files/export-xlsx")
+def export_files_xlsx(request: Request,
+                      q: Optional[str]=None,
+                      status: Optional[str]=None,
+                      client: Optional[str]=None,
+                      bind: Optional[str]=None,
+                      db=Depends(get_db)):
+    """导出当前筛选（忽略分页）：两列 -> 追踪号、订单号"""
+    require_admin(request, db)
+    # 复用 list_files 的候选 + 绑定判定
+    base_q = db.query(TrackingFile)
+    if q:
+        base_q = base_q.filter(TrackingFile.tracking_no.like(f"%{q}%"))
+    if status:
+        base_q = base_q.filter(TrackingFile.print_status == status)
+    if client:
+        base_q = base_q.filter(TrackingFile.last_print_client_name.like(f"%{client}%"))
+    cands = [r[0] for r in base_q.with_entities(TrackingFile.tracking_no).order_by(TrackingFile.uploaded_at.desc()).all()]
+    bound_set = set()
+    if cands:
+        rows = db.execute(text("SELECT tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(tracking_no,'')<>''"),
+                          {"tn": tuple(cands)}).fetchall()
+        bound_set.update([r[0] for r in rows if r and r[0]])
+        rows = db.execute(text("SELECT tracking_no FROM print_events WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' GROUP BY tracking_no"),
+                          {"tn": tuple(cands)}).fetchall()
+        bound_set.update([r[0] for r in rows if r and r[0]])
+    if bind == "bound":
+        tns = [tn for tn in cands if tn in bound_set]
+    elif bind == "unbound":
+        tns = [tn for tn in cands if tn not in bound_set]
+    else:
+        tns = cands
+
+    # 计算绑定订单号（同 list_files）
+    mm = {}
+    if tns:
+        rs = db.execute(text("SELECT order_id, tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' ORDER BY updated_at DESC"),
+                        {"tn": tuple(tns)}).fetchall()
+        for oid, tn in rs:
+            if tn and tn not in mm:
+                mm[tn] = oid
+        rs2 = db.execute(text("SELECT tracking_no, order_id FROM print_events WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' ORDER BY created_at DESC"),
+                         {"tn": tuple(tns)}).fetchall()
+        for tn, oid in rs2:
+            if tn and tn not in mm and oid:
+                mm[tn] = oid
+
+    # 生成 Excel
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "export"
+    ws.append(["追踪号","订单号"])
+    for tn in tns:
+        ws.append([tn, mm.get(tn, "")])
+
+    from io import BytesIO
+    bio = BytesIO()
+    wb.save(bio); bio.seek(0)
+
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"pdf_list_export_{ts}.xlsx"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }
+    return StreamingResponse(bio, headers=headers)
+
+        "request": request,
+        "rows": rows,
+        "q": q,
+        "status": status,
+        "client": client,
+        "bind": bind,
+        "page": page,
+        "pages": pages,
+        "total": total,
+        "page_size": page_size,
+        "extras": extras
+    })
 
 @app.post("/admin/files/batch_delete_all")
 def file_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_db)):
@@ -784,15 +916,75 @@ def admin_file_download(tracking_no: str, request: Request, db=Depends(get_db)):
     return FileResponse(fp, media_type="application/pdf", filename=os.path.basename(fp))
 
 @app.get("/admin/orders", response_class=HTMLResponse)
-def list_orders(request: Request, q: Optional[str]=None, page: int=1, db=Depends(get_db)):
+def list_orders(request: Request,
+                q: Optional[str]=None,
+                bind: Optional[str]=None,   # 'bound' | 'unbound' | None
+                page: int=1,
+                db=Depends(get_db)):
     require_admin(request, db); cleanup_expired(db)
     page_size=100
+
     query = db.query(OrderMapping)
-    if q: query = query.filter(OrderMapping.order_id.like(f"%{q}%"))
+    if q:
+        query = query.filter(OrderMapping.order_id.like(f"%{q}%"))
+
+    # 绑定筛选（已绑定追踪号 / 未绑定）
+    if bind == "bound":
+        query = query.filter(text("ifnull(tracking_no,'')<>''"))
+    elif bind == "unbound":
+        query = query.filter(text("ifnull(tracking_no,'')=''"))
+
     total = query.count()
     rows = query.order_by(OrderMapping.updated_at.desc()).offset((page-1)*page_size).limit(page_size).all()
     pages = max(1, math.ceil(total/page_size))
-    return templates.TemplateResponse("orders.html", {"request": request, "rows": rows, "q": q, "page": page, "pages": pages, "total": total, "page_size": page_size})
+    return templates.TemplateResponse("orders.html", {
+@app.get("/admin/orders/export-xlsx")
+def export_orders_xlsx(request: Request,
+                       q: Optional[str]=None,
+                       bind: Optional[str]=None,
+                       db=Depends(get_db)):
+    """导出订单列表当前筛选（忽略分页）：两列 -> 追踪号、订单号。
+       对未绑定的订单，追踪号留空；若一个订单有多个追踪号，将逐行展开。
+    """
+    require_admin(request, db)
+    query = db.query(OrderMapping)
+    if q:
+        query = query.filter(OrderMapping.order_id.like(f"%{q}%"))
+    if bind == "bound":
+        query = query.filter(text("ifnull(tracking_no,'')<>''"))
+    elif bind == "unbound":
+        query = query.filter(text("ifnull(tracking_no,'')=''"))
+    rows = query.order_by(OrderMapping.updated_at.desc()).all()
+
+    # 生成 Excel
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.title = "export"
+    ws.append(["追踪号","订单号"])
+    for r in rows:
+        tn = (r.tracking_no or "").strip()
+        oid = (r.order_id or "").strip()
+        if tn:
+            ws.append([tn, oid])
+        else:
+            ws.append(["", oid])
+
+    from io import BytesIO
+    bio = BytesIO(); wb.save(bio); bio.seek(0)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"orders_export_{ts}.xlsx"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"',
+               "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+    return StreamingResponse(bio, headers=headers)
+
+        "request": request,
+        "rows": rows,
+        "q": q,
+        "bind": bind,
+        "page": page,
+        "pages": pages,
+        "total": total,
+        "page_size": page_size
+    })
 
 @app.post("/admin/orders/batch_delete_all")
 def orders_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_db)):
