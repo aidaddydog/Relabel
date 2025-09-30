@@ -12,6 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, Text, select
 from sqlalchemy.orm import sessionmaker, declarative_base
+from .print_ext import init_print_ext, PrintEvent
 
 from passlib.hash import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256
 
@@ -114,6 +115,14 @@ class TrackingFile(Base):
     tracking_no = Column(String(128), primary_key=True)
     file_path = Column(Text)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
+    # --- 1.97 新增聚合列 ---
+    print_status = Column(String(16), default="not_printed")      # not_printed | printed | reprinted
+    first_print_time = Column(DateTime, nullable=True)
+    last_print_time = Column(DateTime, nullable=True)
+    print_count = Column(Integer, default=0)
+    last_print_client_name = Column(String(128), default="")
+
+
 
 # -------- 工具函数 --------
 def now_iso(): return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -302,6 +311,11 @@ def verify_code(db, code: str):
         c.fail_count = (c.fail_count or 0) + 1
         if c.fail_count >= 5: c.locked_until = datetime.utcnow() + timedelta(minutes=5)
     db.commit(); return None
+
+# ---- 初始化打印扩展（1.97）----
+from .print_ext import init_print_ext as _init_print_ext_197
+_init_print_ext_197(app, engine, SessionLocal, Base, verify_code)
+
 
 def cleanup_expired(db):
     o_days = int(get_kv(db, 'retention_orders_days', '0') or '0')
@@ -693,7 +707,18 @@ def api_apply_pdf_import(request: Request, tmp: str = Query(...), db=Depends(get
 
 # ------------------ 文件/订单列表与批量操作 ------------------
 @app.get("/admin/files", response_class=HTMLResponse)
-def list_files(request: Request, q: Optional[str]=None, page: int=1, db=Depends(get_db)):
+def list_files(request: Request, q: Optional[str]=None, status: Optional[str]=None, client: Optional[str]=None, page: int=1, db=Depends(get_db)):
+    require_admin(request, db); cleanup_expired(db)
+    page_size=100
+    query = db.query(TrackingFile)
+    if q: query = query.filter(TrackingFile.tracking_no.like(f"%{q}%"))
+    if status:
+        query = query.filter(TrackingFile.print_status == status)
+    if client:
+        query = query.filter(TrackingFile.last_print_client_name.like(f"%{client}%"))
+    total = query.count()
+    rows = query.order_by(TrackingFile.uploaded_at.desc()).offset((page-1)*page_size).limit(page_size).all()
+    pages = max(1, math.ceil(total/page_size))
     require_admin(request, db); cleanup_expired(db)
     page_size=100
     query = db.query(TrackingFile)
@@ -701,7 +726,7 @@ def list_files(request: Request, q: Optional[str]=None, page: int=1, db=Depends(
     total = query.count()
     rows = query.order_by(TrackingFile.uploaded_at.desc()).offset((page-1)*page_size).limit(page_size).all()
     pages = max(1, math.ceil(total/page_size))
-    return templates.TemplateResponse("files.html", {"request": request, "rows": rows, "q": q, "page": page, "pages": pages, "total": total, "page_size": page_size})
+    return templates.TemplateResponse("files.html", {"request": request, "rows": rows, "q": q, "page": page, "pages": pages, "total": total, "page_size": page_size, "status": status, "client": client}
 
 @app.post("/admin/files/batch_delete_all")
 def file_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_db)):
