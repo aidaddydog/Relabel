@@ -65,7 +65,26 @@ if [ -z "$INSTALL_MODE" ]; then
 fi
 echo "安装模式：$INSTALL_MODE"
 
-# 创建/更新 .deploy.env（仅填充默认值，不覆盖已存在）
+# 系统依赖
+step "安装系统依赖"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends git curl ca-certificates tzdata python3-venv python3-pip ufw rsync unzip
+
+# 获取/更新代码（为首次部署准备 install_root.sh）
+step "获取代码到 $DEST（分支：$BRANCH）"
+if [ -d "$DEST/.git" ]; then
+  git -C "$DEST" fetch --all --prune || true
+  git -C "$DEST" checkout "$BRANCH" || true
+  git -C "$DEST" reset --hard "origin/$BRANCH" || true
+  git -C "$DEST" clean -fd || true
+else
+  rm -rf "$DEST"
+  git clone -b "$BRANCH" "$REPO" "$DEST"
+fi
+ok "代码准备完成"
+
+# 创建/更新 .deploy.env（放在代码更新之后，避免被 git clean 删除）
 step "准备 $DEST/.deploy.env（默认配置，不覆盖已有文件）"
 mkdir -p "$DEST"
 if [ ! -f "$DEST/.deploy.env" ]; then
@@ -84,55 +103,13 @@ else
   ok "$DEST/.deploy.env 已存在，保持不变"
 fi
 
-# 系统依赖
-step "安装系统依赖"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y --no-install-recommends git curl ca-certificates tzdata python3-venv python3-pip ufw rsync unzip
-
-# 获取/更新代码（先准备脚本本身所需）
-step "获取代码到 $DEST（分支：$BRANCH）"
-if [ -d "$DEST/.git" ]; then
-  git -C "$DEST" fetch --all --prune || true
-  git -C "$DEST" checkout "$BRANCH" || true
-  git -C "$DEST" reset --hard "origin/$BRANCH" || true
-  git -C "$DEST" clean -fd || true
-else
-  rm -rf "$DEST"
-  git clone -b "$BRANCH" "$REPO" "$DEST"
-fi
-ok "代码准备完成"
-
-# 如果全新安装，二次确认并清理数据目录
-if [ "$INSTALL_MODE" = "fresh" ]; then
-  if is_tty; then
-    read -r -p "⚠ 将清空 $DEST（代码）与 $DATA（数据），是否继续? [yes/NO]: " confirm
-    confirm="${confirm:-no}"
-    if [[ ! "$confirm" =~ ^[Yy][Ee][Ss]$ ]]; then
-      die "已取消"
-    fi
-  fi
-  step "停止服务并清理数据目录：$DATA"
-  systemctl stop huandan.service 2>/dev/null || true
-  TS="$(date +%Y%m%d-%H%M%S)"
-  BACKUP_DIR="/opt/huandan-backups/$TS"
-  mkdir -p "$BACKUP_DIR"
-  if [ -d "$DATA" ]; then
-    rsync -a "$DATA/" "$BACKUP_DIR/huandan-data/" 2>/dev/null || true
-    rm -rf "$DATA"
-  fi
-  mkdir -p "$DATA"
-  ok "数据目录已重建：$DATA（备份：$BACKUP_DIR/huandan-data/）"
-fi
-
-# 执行仓库内安装脚本（把 BASE 指向 $DEST；全新安装时开启 AUTO_CLEAN）
+# 执行仓库内安装脚本（不要切换到 $DEST，避免被 AUTO_CLEAN 删除当前工作目录）
 step "执行安装脚本"
-cd "$DEST"
-chmod +x scripts/install_root.sh
+chmod +x "$DEST/scripts/install_root.sh"
 if [ "$INSTALL_MODE" = "fresh" ]; then
-  AUTO_CLEAN=yes BASE="$DEST" bash scripts/install_root.sh
+  AUTO_CLEAN=yes BASE="$DEST" bash "$DEST/scripts/install_root.sh"
 else
-  BASE="$DEST" bash scripts/install_root.sh
+  BASE="$DEST" bash "$DEST/scripts/install_root.sh"
 fi
 
 # 全新安装：管理员初始化（迁移网页步骤到脚本里）
