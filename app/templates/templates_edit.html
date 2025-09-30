@@ -1,4 +1,4 @@
-{% include "_nav.html" %}{% block content %}
+{% extends "layout.html" %}{% block content %}
 <h2>编辑：<code>{{path}}</code> <span class="muted">（{{cn}}）</span></h2>
 {% if request.query_params.get('saved') %}<div class="ok">已保存（已自动备份到 updates/template-backups/）。</div>{% endif %}
 

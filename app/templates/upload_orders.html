@@ -1,5 +1,4 @@
-{% include "_nav.html" %}
-{% block content %}
+{% extends "layout.html" %}{% block content %}
 <h2>上传 Excel/CSV（步骤1/3：选择文件）</h2>
 {% if err %}<div class="err">{{err}}</div>{% endif %}
 <form method="post" action="/admin/upload-orders-step1" enctype="multipart/form-data">
