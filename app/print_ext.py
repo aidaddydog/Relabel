@@ -1,27 +1,25 @@
 
 # app/print_ext.py
 """
-打印扩展（1.97）
-- 新增打印事件表 PrintEvent
-- 新增 API：
-  * GET  /api/v1/print/check
-  * POST /api/v1/print/report
-- 追踪号维度的聚合写回 tracking_file（print_status/first_print_time/last_print_time/print_count/last_print_client_name）
-- 提供简易“客户端子列表”（按访问码聚合最近出现的 host/MAC/IP），供管理页展示
-说明：
-  * 为避免与 app.main 循环依赖，本模块仅通过原生 SQL 更新 tracking_file 的新增列；
-  * 列不存在时自动 ALTER TABLE 以兼容旧库（SQLite）。
+打印扩展（1.97 - fix3）
+- 兼容 SQLAlchemy 1.3/1.4/2.0：ensure_schema 使用 engine.begin() 自动提交，去掉 conn.commit()
+- 新增/保持：
+  * print_events 审计表
+  * /api/v1/print/check
+  * /api/v1/print/report
+  * /api/v1/clients/by-code
+  * tracking_file 聚合列自动补充
 """
 from datetime import datetime
 import json
-from typing import Optional, List, Dict, Any
+from typing import Optional
 
 from fastapi import Request, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import Column, Integer, String, Text, DateTime, text
-from sqlalchemy.orm import Session, declarative_base
+from sqlalchemy.orm import Session
 
-# 由 init_print_ext 注入
+# 注入自 app.main
 SessionLocal = None
 Base = None
 engine = None
@@ -30,13 +28,13 @@ verify_code = None
 def _utcnow():
     return datetime.utcnow()
 
-# ---------- 新表：打印事件 ----------
+# ---------- 新表：打印事件（ORM 模型在 init_print_ext 中动态挂到 Base） ----------
 class PrintEventBase:
     __tablename__ = "print_events"
     id = Column(Integer, primary_key=True, autoincrement=True)
     access_code = Column(String(16), index=True)
     input_kind = Column(String(16))           # 'order' | 'tracking'
-    code_value = Column(String(128))          # 扫入的原始值（便于审计）
+    code_value = Column(String(128))          # 扫入原值
     order_id = Column(String(128), index=True, nullable=True)
     tracking_no = Column(String(128), index=True)
     result = Column(String(32))               # 'success' | 'fail' | 'success_reprint'
@@ -55,19 +53,36 @@ def ensure_schema():
     """
     - 创建 print_events 表
     - 为 tracking_file 表补新增列
+    兼容 SQLAlchemy 1.3：使用 engine.begin()，不直接调用 Connection.commit()
     """
     # 1) 创建 print_events（若不存在）
     Base.metadata.create_all(bind=engine, checkfirst=True)
 
-    # 2) tracking_file 补列
-    with engine.connect() as conn:
-        # 查询现有列
-        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(tracking_file)")).fetchall()}
+    # 2) tracking_file 补列（事务自动提交）
+    with engine.begin() as conn:
+        cols = set()
+        try:
+            rows = conn.execute(text("PRAGMA table_info(tracking_file)")).fetchall()
+            # PRAGMA table_info: (cid,name,type,notnull,dflt_value,pk)
+            for row in rows:
+                try:
+                    cols.add(row[1])
+                except Exception:
+                    # 兜底
+                    try:
+                        cols.add(row["name"])
+                    except Exception:
+                        pass
+        except Exception:
+            rows = []
+
         def addcol(sql):
             try:
                 conn.execute(text(sql))
             except Exception:
+                # 已存在或语法不支持时忽略
                 pass
+
         if "print_status" not in cols:
             addcol("ALTER TABLE tracking_file ADD COLUMN print_status TEXT DEFAULT 'not_printed'")
         if "first_print_time" not in cols:
@@ -78,7 +93,6 @@ def ensure_schema():
             addcol("ALTER TABLE tracking_file ADD COLUMN print_count INTEGER DEFAULT 0")
         if "last_print_client_name" not in cols:
             addcol("ALTER TABLE tracking_file ADD COLUMN last_print_client_name TEXT DEFAULT ''")
-        conn.commit()
 
 def _norm(s: Optional[str]) -> str:
     return (s or "").strip()
@@ -99,15 +113,17 @@ def _update_tracking_aggregate(db: Session, tracking_no: str, host: str, is_succ
     if not tn:
         return
     now = _utcnow()
-    # 读当前计数
     row = db.execute(text("SELECT print_count FROM tracking_file WHERE tracking_no=:tn"), {"tn": tn}).fetchone()
     if not row:
-        # 未登记追踪号（极少见）：插入一条空路径记录以便聚合（不影响文件存取）
         db.execute(text("INSERT OR IGNORE INTO tracking_file (tracking_no, file_path, uploaded_at, print_status, first_print_time, last_print_time, print_count, last_print_client_name) VALUES (:tn,'',:now,'not_printed',NULL,NULL,0,'')"),
                    {"tn": tn, "now": now})
         cnt = 0
     else:
-        cnt = int(row[0] or 0)
+        try:
+            cnt = int(row[0] or 0)
+        except Exception:
+            # 兼容命名访问
+            cnt = int((row["print_count"] if "print_count" in row.keys() else 0) or 0)
 
     if is_success:
         if cnt <= 0:
@@ -161,13 +177,11 @@ def init_print_ext(app, _engine, _SessionLocal, _Base, _verify_code):
         if not c:
             raise HTTPException(status_code=403, detail="invalid code")
 
-        # 规范入参
         input_kind = (input_kind or "order").lower()
         order_id = _norm(order_id)
         tracking_no = _norm(tracking_no)
         code_value = _norm(code_value)
 
-        # 判重：订单维度与追踪号维度都查
         dup_order = False
         dup_tracking = False
         if order_id:
@@ -185,11 +199,13 @@ def init_print_ext(app, _engine, _SessionLocal, _Base, _verify_code):
         elif dup_order:
             duplicate_kind = "order"
 
-        # 读取累计次数
         total_cnt = 0
         if tracking_no:
             row = db.execute(text("SELECT print_count FROM tracking_file WHERE tracking_no=:tn"), {"tn": tracking_no}).fetchone()
-            total_cnt = int((row[0] if row else 0) or 0)
+            try:
+                total_cnt = int((row[0] if row else 0) or 0)
+            except Exception:
+                total_cnt = int((row["print_count"] if (row and "print_count" in row.keys()) else 0) or 0)
 
         return JSONResponse({
             "allow": True,
@@ -234,25 +250,31 @@ def init_print_ext(app, _engine, _SessionLocal, _Base, _verify_code):
         )
         db.add(ev); db.commit()
 
-        # 聚合写回 tracking_file
         _update_tracking_aggregate(db, tracking_no, host, is_success=(result in ["success","success_reprint"]))
 
-        # 返回累积信息
         row = db.execute(text("SELECT print_status, print_count, last_print_time, last_print_client_name FROM tracking_file WHERE tracking_no=:tn"), {"tn": tracking_no}).fetchone()
+        def _val(i, name):
+            try:
+                return row[i]
+            except Exception:
+                try:
+                    return row[name]
+                except Exception:
+                    return None
+        last_time = _val(2, "last_print_time")
         resp = {
             "ok": True,
-            "print_status": row[0] if row else "not_printed",
-            "print_count": int((row[1] if row else 0) or 0),
-            "last_print_time": (row[2].isoformat(sep=' ', timespec='seconds') if row and row[2] else ""),
-            "last_print_client_name": (row[3] if row else "")
+            "print_status": _val(0, "print_status") or "not_printed",
+            "print_count": int((_val(1, "print_count") or 0) or 0),
+            "last_print_time": (last_time.isoformat(sep=' ', timespec='seconds') if last_time else ""),
+            "last_print_client_name": _val(3, "last_print_client_name") or ""
         }
         return JSONResponse(resp)
 
-    # ---- Admin：查询某访问码下的客户端子列表（给管理页调用）----
+    # ---- Admin：查询某访问码下的客户端子列表 ----
     @app.get("/api/v1/clients/by-code")
     def api_clients_by_code(access_code: str = Query(""), db: Session = Depends(get_db)):
         rows = db.query(PrintEvent).filter(PrintEvent.access_code == access_code).order_by(PrintEvent.created_at.desc()).all()
-        # 聚合去重：host + mac_list 作为设备指纹
         out = []
         seen = set()
         for r in rows:
@@ -262,14 +284,14 @@ def init_print_ext(app, _engine, _SessionLocal, _Base, _verify_code):
             except Exception:
                 macs, ips = [], []
             key = (r.host or "", json.dumps(macs, ensure_ascii=False))
-            if key in seen: 
+            if key in seen:
                 continue
             seen.add(key)
             out.append({
                 "host": r.host or "",
                 "mac_list": macs,
                 "ip_list": ips,
-                "last_seen": r.created_at.isoformat(sep=' ', timespec='seconds'),
+                "last_seen": (r.created_at.isoformat(sep=' ', timespec='seconds') if r.created_at else ""),
                 "client_version": r.client_version or ""
             })
         return {"devices": out}
