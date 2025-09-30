@@ -750,6 +750,7 @@ def api_apply_pdf_import(request: Request, tmp: str = Query(...), db=Depends(get
     return StreamingResponse(_stream(), media_type="text/event-stream", headers={"Cache-Control":"no-cache"})
 
 # ------------------ 文件/订单列表与批量操作 ------------------
+
 @app.get("/admin/files", response_class=HTMLResponse)
 def list_files(request: Request,
                q: Optional[str]=None,
@@ -782,11 +783,9 @@ def list_files(request: Request,
     # 计算“已绑定”集合：order_mapping + print_events（有 order_id）
     bound_set = set()
     if cands:
-        # order_mapping
         rows = db.execute(text("SELECT tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(tracking_no,'')<>''"),
                           {"tn": tuple(cands)}).fetchall()
         bound_set.update([r[0] for r in rows if r and r[0]])
-        # print_events（最近一次是否有 order_id 即视为绑定）
         rows = db.execute(text("SELECT tracking_no FROM print_events WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' GROUP BY tracking_no"),
                           {"tn": tuple(cands)}).fetchall()
         bound_set.update([r[0] for r in rows if r and r[0]])
@@ -814,7 +813,6 @@ def list_files(request: Request,
     extras = {}
     if page_tns:
         # 订单号（优先 order_mapping，缺省再从 print_events 最近一次取）
-        # order_mapping
         mm = {}
         rs = db.execute(text("SELECT order_id, tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' ORDER BY updated_at DESC"),
                         {"tn": tuple(page_tns)}).fetchall()
@@ -846,7 +844,7 @@ def list_files(request: Request,
                 "status_cn": cn.get(next((r.print_status for r in rows if r.tracking_no==tn), "not_printed"), "未打印")
             }
 
-    return templates.TemplateResponse("files.html", {
+    return templates.TemplateResponse("files.html", {"request": request, "rows": rows, "q": q, "status": status, "client": client, "bind": bind, "page": page, "pages": pages, "total": total, "page_size": page_size, "extras": extras})
 
 @app.get("/admin/files/export-xlsx")
 def export_files_xlsx(request: Request,
@@ -916,19 +914,6 @@ def export_files_xlsx(request: Request,
     }
     return StreamingResponse(bio, headers=headers)
 
-        "request": request,
-        "rows": rows,
-        "q": q,
-        "status": status,
-        "client": client,
-        "bind": bind,
-        "page": page,
-        "pages": pages,
-        "total": total,
-        "page_size": page_size,
-        "extras": extras
-    })
-
 @app.post("/admin/files/batch_delete_all")
 def file_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_db)):
     require_admin(request, db)
@@ -981,7 +966,8 @@ def list_orders(request: Request,
     total = query.count()
     rows = query.order_by(OrderMapping.updated_at.desc()).offset((page-1)*page_size).limit(page_size).all()
     pages = max(1, math.ceil(total/page_size))
-    return templates.TemplateResponse("orders.html", {
+    return templates.TemplateResponse("orders.html", {"request": request, "rows": rows, "q": q, "bind": bind, "page": page, "pages": pages, "total": total, "page_size": page_size})
+
 @app.get("/admin/orders/export-xlsx")
 def export_orders_xlsx(request: Request,
                        q: Optional[str]=None,
@@ -1019,16 +1005,6 @@ def export_orders_xlsx(request: Request,
     headers = {"Content-Disposition": f'attachment; filename="{filename}"',
                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
     return StreamingResponse(bio, headers=headers)
-
-        "request": request,
-        "rows": rows,
-        "q": q,
-        "bind": bind,
-        "page": page,
-        "pages": pages,
-        "total": total,
-        "page_size": page_size
-    })
 
 @app.post("/admin/orders/batch_delete_all")
 def orders_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_db)):
