@@ -5,13 +5,28 @@
   <button type="submit" class="primary">对齐文件夹与列表</button>
 </form>
 <form method="get" class="row">
-  <input name="q" value="{{q or ''}}" placeholder="按运单搜索"><button type="submit">查询</button>
+  <input name="q" value="{{q or ''}}" placeholder="按运单搜索">
+  <select name="status">
+    <option value="" {{ 'selected' if not status }}>全部状态</option>
+    <option value="not_printed" {{ 'selected' if status=='not_printed' }}>未打印</option>
+    <option value="printed" {{ 'selected' if status=='printed' }}>已打印</option>
+    <option value="reprinted" {{ 'selected' if status=='reprinted' }}>重复打印</option>
+  </select>
+  <input name="client" value="{{client or ''}}" placeholder="按客户端搜索">
+  <button type="submit">筛选</button>
 </form>
 <form method="post" action="/admin/files/batch_delete_all" class="row" onsubmit="return confirm('确定批量删除？若未设置搜索条件将删除全部 PDF。')">
-  <input type="hidden" name="q" value="{{q or ''}}"><button type="submit" class="danger">批量删除</button>
+  <input type="hidden" name="q" value="{{q or ''}}">
+  <button type="submit" class="danger">批量删除</button>
 </form>
 <table class="table">
-  <thead><tr><th>#</th><th>运单</th><th>文件</th><th>上传时间</th><th>操作</th></tr></thead>
+  <thead>
+    <tr>
+      <th>#</th><th>运单</th><th>文件</th><th>上传时间</th>
+      <th>打印状态</th><th>打印时间</th><th>打印次数</th><th>打印客户端名称</th>
+      <th>操作</th>
+    </tr>
+  </thead>
   <tbody>
     {% for r in rows %}
     <tr>
@@ -19,6 +34,10 @@
       <td>{{r.tracking_no}}</td>
       <td>{{r.file_path}}</td>
       <td>{{r.uploaded_at}}</td>
+      <td>{{r.print_status or 'not_printed'}}</td>
+      <td>{% if r.last_print_time %}{{r.last_print_time}}{% endif %}</td>
+      <td>{{r.print_count or 0}}</td>
+      <td>{{r.last_print_client_name or ''}}</td>
       <td><a href="/admin/file/{{r.tracking_no}}" target="_blank">下载</a></td>
     </tr>
     {% endfor %}
@@ -26,7 +45,7 @@
 </table>
 <div class="pager">
   {% for p in range(1, pages+1) %}
-    {% if p==page %}<b>{{p}}</b>{% else %}<a href="?page={{p}}&q={{q or ''}}">{{p}}</a>{% endif %}
+    {% if p==page %}<b>{{p}}</b>{% else %}<a href="?page={{p}}&q={{q or ''}}&status={{status or ''}}&client={{client or ''}}">{{p}}</a>{% endif %}
   {% endfor %}
 </div>
 {% endblock %}
