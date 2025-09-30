@@ -1,5 +1,4 @@
-{% include "_nav.html" %}
-{% block content %}
+{% extends "layout.html" %}{% block content %}
 <h2>客户端访问码</h2>
 <form method="post" action="/admin/clients/add" class="row">
   <input name="code6" placeholder="6位数字" maxlength="6">
