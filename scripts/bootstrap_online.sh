@@ -65,25 +65,16 @@ if [ -z "$INSTALL_MODE" ]; then
 fi
 echo "安装模式：$INSTALL_MODE"
 
-# ------- 修复 apt 依赖安装（处理 3.12 版本号不一致） -------
+# ------- 系统依赖（不强依赖 python3-venv，改用 virtualenv 兜底） -------
 step "安装系统依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-# 先装通用工具
+# 通用工具
 apt-get install -y --no-install-recommends git curl ca-certificates tzdata unzip rsync ufw || true
-# 再装 Python（稳健装法）
-if ! apt-get install -y --no-install-recommends python3 python3-pip python3-venv; then
-  warn "python3-venv 安装失败，尝试匹配候选版本..."
-  PYV="$(apt-cache policy python3.12 | awk '/Candidate:/ {print $2}')"
-  PVV="$(apt-cache policy python3.12-venv | awk '/Candidate:/ {print $2}')"
-  if [ -n "${PYV}${PVV}" ]; then
-    apt-get install -y --no-install-recommends ${PYV:+python3.12=$PYV} ${PVV:+python3.12-venv=$PVV} python3-pip || true
-  fi
-  apt-get -f install -y || true
-  # 再试一次常规与直接指明 3.12
-  apt-get install -y --no-install-recommends python3 python3-pip python3-venv || \
-  apt-get install -y --no-install-recommends python3.12 python3.12-venv python3-pip || true
-fi
+# Python 与虚拟环境方案（避免 3.12-venv 版号冲突）
+apt-get install -y --no-install-recommends python3 python3-pip || true
+apt-get install -y --no-install-recommends python3-virtualenv || true
+python3 -m pip install -U virtualenv || true
 command -v python3 >/dev/null || die "系统缺少 python3，请手动修复 apt 源后重试"
 
 # ------- 获取/更新代码（为首次部署准备 install_root.sh） -------
