@@ -1,0 +1,48 @@
+{% include "_nav.html" %}
+{% block content %}
+<h2>客户端访问码</h2>
+<form method="post" action="/admin/clients/add" class="row">
+  <input name="code6" placeholder="6位数字" maxlength="6">
+  <input name="description" placeholder="备注">
+  <button type="submit">新增</button>
+</form>
+<table class="table">
+  <thead><tr><th>#</th><th>说明</th><th>明码</th><th>状态</th><th>创建</th><th>最近</th><th>操作</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td>{{r.id}}</td><td>{{r.description}}</td><td>{{r.code_plain or '***'}}</td>
+    <td>{{'启用' if r.is_active else '停用'}}</td>
+    <td>{{r.created_at}}</td><td>{{r.last_used or ''}}</td>
+    <td>
+      <form method="post" action="/admin/clients/toggle" style="display:inline">
+        <input type="hidden" name="client_id" value="{{r.id}}"><button type="submit">启停</button>
+      </form>
+      <form method="post" action="/admin/clients/delete" style="display:inline">
+        <input type="hidden" name="client_id" value="{{r.id}}"><button type="submit" onclick="return confirm('删除？')">删除</button>
+      </form>
+    </td>
+  </tr>
+  {% set devs = device_map.get(r.code_plain or '') or [] %}
+  {% if devs %}
+  <tr>
+    <td colspan="7" style="background:#fafafa">
+      <div><b>客户端子列表（{{devs|length}}）</b></div>
+      <ul>
+      {% for d in devs %}
+        <li>
+          <b>{{d.host}}</b>
+          <span>｜MAC：{{ d.mac_list|join(', ') }}</span>
+          <span>｜IP：{{ d.ip_list|join(', ') }}</span>
+          <span>｜最近：{{ d.last_seen }}</span>
+          <span>｜版本：{{ d.client_version }}</span>
+        </li>
+      {% endfor %}
+      </ul>
+    </td>
+  </tr>
+  {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
