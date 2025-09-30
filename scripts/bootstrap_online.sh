@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
-# Huandan 在线一键部署（交互式：全新安装/升级安装 + 管理员初始化）
-# 用法：bash <(curl -fsSL https://raw.githubusercontent.com/aidaddydog/huandan.server/main/scripts/bootstrap_online.sh)
+# Huandan 在线一键部署（交互：全新安装/升级安装；删除Web初始化页；终端创建/复用管理员）
 set -Eeuo pipefail
 
 LOG=/var/log/huandan-bootstrap.log
 mkdir -p "$(dirname "$LOG")"
 exec > >(tee -a "$LOG") 2>&1
 
-# 可通过环境变量预设：INSTALL_MODE=fresh|upgrade ADMIN_USER=xxx ADMIN_PASS=xxx
 : "${BRANCH:=main}"
 : "${REPO:=https://github.com/aidaddydog/huandan.server.git}"
 : "${DEST:=/opt/huandan-server}"
 : "${DATA:=/opt/huandan-data}"
 : "${PORT:=8000}"
 : "${HOST:=0.0.0.0}"
-: "${INSTALL_MODE:=}"
-: "${ADMIN_USER:=}"
-: "${ADMIN_PASS:=}"
 
-step(){ echo "==> $*"; }
-ok(){ echo "✔ $*"; }
+die(){ echo "✘ $*" >&2; exit 1; }
 warn(){ echo "⚠ $*"; }
-die(){ echo "✘ $*"; exit 1; }
-trap 'echo -e "\n✘ 失败，请执行：\n  journalctl -u huandan.service -e -n 200\n查看 $LOG 获取完整日志"; exit 1' ERR
+ok(){ echo "✔ $*"; }
+step(){ echo; echo "==> $*"; }
 
 is_tty(){ [ -t 0 ] && [ -t 1 ]; }
 ask() {
@@ -50,110 +44,50 @@ banner(){
 banner
 
 # 选择安装模式
-if [ -z "$INSTALL_MODE" ]; then
+if [ -z "${INSTALL_MODE:-}" ]; then
   echo "请选择安装模式："
   echo "  1) 全新安装（清空旧代码与数据）"
-  echo "  2) 升级安装（仅更新代码与依赖，不重置数据库）"
-  while true; do
-    read -r -p "输入数字 1 或 2 并回车: " ans
-    case "$ans" in
-      1) INSTALL_MODE="fresh"; break;;
-      2) INSTALL_MODE="upgrade"; break;;
-      *) echo "请输入 1 或 2";;
-    esac
-  done
+  echo "  2) 升级安装（保留数据与管理员，静默）"
+  read -r -p "输入数字 [1/2]：" sel
+  case "$sel" in
+    1) INSTALL_MODE="fresh" ;;
+    2) INSTALL_MODE="upgrade" ;;
+    *) die "无效选择" ;;
+  esac
 fi
-echo "安装模式：$INSTALL_MODE"
+ok "安装模式：$INSTALL_MODE"
 
-# ------- 系统依赖（不强依赖 python3-venv，改用 virtualenv 兜底） -------
-step "安装系统依赖"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-# 通用工具
-apt-get install -y --no-install-recommends git curl ca-certificates tzdata unzip rsync ufw || true
-# Python 与虚拟环境方案（避免 3.12-venv 版号冲突）
-apt-get install -y --no-install-recommends python3 python3-pip || true
-apt-get install -y --no-install-recommends python3-virtualenv || true
-python3 -m pip install -U virtualenv || true
-command -v python3 >/dev/null || die "系统缺少 python3，请手动修复 apt 源后重试"
-
-# ------- 获取/更新代码（为首次部署准备 install_root.sh） -------
-step "获取代码到 $DEST（分支：$BRANCH）"
-if [ -d "$DEST/.git" ]; then
-  git -C "$DEST" fetch --all --prune || true
-  git -C "$DEST" checkout "$BRANCH" || true
-  git -C "$DEST" reset --hard "origin/$BRANCH" || true
-  git -C "$DEST" clean -fd || true
-else
-  rm -rf "$DEST"
-  git clone -b "$BRANCH" "$REPO" "$DEST"
-fi
-ok "代码准备完成"
-
-# ------- .deploy.env 放在代码更新之后，避免被 clean 删除 -------
-step "准备 $DEST/.deploy.env（默认配置，不覆盖已有文件）"
-mkdir -p "$DEST"
-if [ ! -f "$DEST/.deploy.env" ]; then
-  cat > "$DEST/.deploy.env" <<ENV
-PORT=$PORT
-HOST=$HOST
-AUTO_CLEAN=no
-BRANCH=$BRANCH
-REPO=$REPO
-DATA=$DATA
-SECRET_KEY=please-change-me
-# BASE 由安装脚本自动识别为当前仓库根
-ENV
-  ok "已生成 $DEST/.deploy.env"
-else
-  ok "$DEST/.deploy.env 已存在，保持不变"
-fi
-
-# ------- 用绝对路径执行 install_root.sh，避免当前目录被删 -------
-step "执行安装脚本"
-chmod +x "$DEST/scripts/install_root.sh"
+# 如为全新安装，收集管理员账号/密码（隐藏回显/二次确认）
 if [ "$INSTALL_MODE" = "fresh" ]; then
-  AUTO_CLEAN=yes BASE="$DEST" bash "$DEST/scripts/install_root.sh"
+  ask "设置管理员用户名（默认 admin）：" ADMIN_USER
+  ADMIN_USER="${ADMIN_USER:-admin}"
+  while :; do
+    ask "设置管理员密码：" ADMIN_PASS yes
+    ask "再次输入管理员密码：" ADMIN_PASS2 yes
+    [ "$ADMIN_PASS" = "$ADMIN_PASS2" ] || { warn "两次输入不一致，请重试"; continue; }
+    # 简单强度门槛
+    if [ ${#ADMIN_PASS} -lt 12 ]; then
+      warn "建议使用 12 位以上强口令"; fi
+    break
+  done
 else
-  BASE="$DEST" bash "$DEST/scripts/install_root.sh"
+  ok "升级安装：默认复用数据库现有管理员，不需输入口令"
 fi
 
-# ------- 全新安装：管理员初始化迁移到脚本 -------
-if [ "$INSTALL_MODE" = "fresh" ]; then
-  step "管理员初始化（脚本内完成）"
-  ask "请输入管理员账号: " ADMIN_USER
-  while [ -z "$ADMIN_USER" ]; do ask "管理员账号不能为空，请重新输入: " ADMIN_USER; done
-  ask "请输入管理员密码（输入不可见）: " ADMIN_PASS yes
-  while [ -z "$ADMIN_PASS" ]; do ask "管理员密码不能为空，请重新输入（输入不可见）: " ADMIN_PASS yes; done
-  ask "请再次输入管理员密码确认: " ADMIN_PASS2 yes
-  if [ "${ADMIN_PASS2:-}" != "$ADMIN_PASS" ]; then die "两次输入的密码不一致"; fi
-
-  # 等待服务就绪
-  echo "等待服务启动就绪..."
-  for i in $(seq 1 40); do
-    if curl -fsS "http://127.0.0.1:$PORT/admin/bootstrap" -o /dev/null; then break; fi
-    sleep 1
-  done
-
-  # 若系统已存在管理员，则跳过初始化
-  HTTP_CODE="$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/admin/bootstrap")" || true
-  if [ "$HTTP_CODE" = "302" ]; then
-    ok "系统检测到已存在管理员，跳过初始化"
+# 拉取/更新代码，执行安装脚本
+step "下载/更新代码并执行安装（install_root.sh）"
+export BRANCH REPO DEST DATA PORT HOST INSTALL_MODE ADMIN_USER ADMIN_PASS
+bash -c 'set -Eeuo pipefail; 
+  mkdir -p "$DEST";
+  if [ -d "$DEST/.git" ]; then
+    git -C "$DEST" fetch --all --prune || true
+    git -C "$DEST" reset --hard "origin/$BRANCH" || true
   else
-    # 提交初始化
-    INIT_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-      --data-urlencode "username=$ADMIN_USER" \
-      --data-urlencode "password=$ADMIN_PASS" \
-      "http://127.0.0.1:$PORT/admin/bootstrap")" || true
-
-    if [ "$INIT_CODE" = "302" ]; then
-      ok "管理员创建成功（已迁移到 /admin/login）"
-    else
-      warn "管理员创建未返回 302，HTTP=$INIT_CODE；请手动访问 /admin/bootstrap 或查看日志"
-    fi
+    git clone -b "$BRANCH" "$REPO" "$DEST"
   fi
-fi
+  chmod +x "$DEST/scripts/install_root.sh"
+  BASE="$DEST" bash "$DEST/scripts/install_root.sh"
+'
 
-echo
-ok "完成。后台：http://<服务器IP>:$PORT/admin   首次初始化：已在脚本内完成（全新安装）"
+ok "完成。后台：http://<服务器IP>:$PORT/admin"
 echo "日志：journalctl -u huandan.service -e -n 200"

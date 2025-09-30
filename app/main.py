@@ -14,15 +14,64 @@ from sqlalchemy import text, create_engine, Column, String, Integer, Boolean, Da
 from sqlalchemy.orm import sessionmaker, declarative_base
 from .print_ext import init_print_ext as _init_print_ext_197
 
-from passlib.hash import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256
+from passlib.hash
+# ---- 口令哈希（重构为 Argon2id + Pepper）----
+import hmac, secrets
 
-# ---- 密码哈希兼容层 ----
-# 使用 bcrypt_sha256 以避免 72 字节限制，同时兼容历史上用 bcrypt 生成的散列。
+def _pepper_bytes() -> bytes:
+    """
+    读取 Pepper（优先从文件，其次环境变量）。不存在时返回空字节（仅用于兼容旧哈希验证）。
+    - HUANDAN_PEPPER_FILE=/etc/huandan/secret_pepper
+    - HUANDAN_PEPPER=hex 或 原始文本
+    """
+    pfile = os.environ.get("HUANDAN_PEPPER_FILE", "").strip()
+    if pfile and os.path.exists(pfile):
+        try:
+            data = open(pfile, "rb").read().strip()
+            return data
+        except Exception:
+            pass
+    val = os.environ.get("HUANDAN_PEPPER", "").strip()
+    if not val:
+        return b""
+    try:
+        # 尝试把 hex 解析为 bytes
+        return bytes.fromhex(val)
+    except Exception:
+        return val.encode("utf-8")
+
+# Argon2id 参数：time_cost(rounds)、memory_cost(KiB)、parallelism
+_ARGON2 = _argon2.using(type="ID", rounds=3, memory_cost=65536, parallelism=2)
+
+def _hmac_sha256(pepr: bytes, pw: str) -> str:
+    return hmac.new(pepr, pw.encode("utf-8"), hashlib.sha256).hexdigest()
+
 def _hash_password(pw: str) -> str:
-    return _bcrypt_sha256.hash(pw)
+    """
+    新增：Argon2id( HMAC(pepper, password) )
+    兼容：若 pepper 缺失，仅用于开发/兼容（强烈建议部署脚本生成 pepper）
+    """
+    pepr = _pepper_bytes()
+    payload = _hmac_sha256(pepr, pw) if pepr else pw
+    return _ARGON2.hash(payload)
+
+def _is_argon2_hash(h: str) -> bool:
+    return isinstance(h, str) and h.startswith("$argon2")
 
 def _verify_password(pw: str, hh: str) -> bool:
-    # 先按 bcrypt_sha256 校验，失败后再回退到老的 bcrypt
+    """
+    验证顺序：
+    1) 如果是 Argon2 散列：按 Argon2id + pepper 验证
+    2) 回退验证 bcrypt_sha256、bcrypt（历史散列）
+    """
+    try:
+        if _is_argon2_hash(hh):
+            pepr = _pepper_bytes()
+            payload = _hmac_sha256(pepr, pw) if pepr else pw
+            return _ARGON2.verify(payload, hh)
+    except Exception:
+        pass
+    # 兼容旧散列
     try:
         return _bcrypt_sha256.verify(pw, hh)
     except Exception:
@@ -30,6 +79,16 @@ def _verify_password(pw: str, hh: str) -> bool:
             return _bcrypt_legacy.verify(pw, hh)
         except Exception:
             return False
+
+def _needs_rehash(hh: str) -> bool:
+    """非 Argon2 或 Argon2 参数变化时需要再哈希。"""
+    try:
+        if not _is_argon2_hash(hh):
+            return True
+        return _ARGON2.needs_update(hh)
+    except Exception:
+        return True
+ import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256, argon2 as _argon2
 
 import pandas as pd
 
@@ -354,7 +413,7 @@ def login_page(request: Request, db=Depends(get_db)):
     # 若尚无管理员，跳转到初始化页面
     try:
         if db.query(AdminUser).count() == 0:
-            return RedirectResponse("/admin/bootstrap", status_code=302)
+            return RedirectResponse("/admin/login", status_code=302)
     except Exception:
         pass
     return templates.TemplateResponse("login.html", {"request": request})
@@ -378,34 +437,6 @@ def require_admin(request: Request, db):
     return
 
 # 首次初始化管理员（仍保留）
-@app.get("/admin/bootstrap", response_class=HTMLResponse)
-def bootstrap_page(request: Request, db=Depends(get_db)):
-    has = db.query(AdminUser).count()
-    if has > 0: return RedirectResponse("/admin/login", status_code=302)
-    return templates.TemplateResponse("bootstrap.html", {"request": request})
-
-@app.post("/admin/bootstrap")
-def bootstrap_do(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
-    has = db.query(AdminUser).count()
-    if has > 0:
-        return RedirectResponse("/admin/login", status_code=302)
-    error = None
-    try:
-        if not username or not password:
-            error = "用户名和密码不能为空"
-        elif len(username) > 64:
-            error = "用户名过长（最多64个字符）"
-        elif db.query(AdminUser).filter(AdminUser.username==username).first():
-            error = "该用户名已存在"
-        else:
-            db.add(AdminUser(username=username, password_hash=_hash_password(password), is_active=True))
-            db.commit()
-            return RedirectResponse("/admin/login", status_code=302)
-    except Exception as e:
-        db.rollback()
-        error = f"初始化失败：{e}"
-    return templates.TemplateResponse("bootstrap.html", {"request": request, "error": error}, status_code=400)
-
 
 @app.get("/admin", response_class=HTMLResponse)
 def dashboard(request: Request, db=Depends(get_db)):
