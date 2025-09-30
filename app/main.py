@@ -10,9 +10,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, Text, select
+from sqlalchemy import text, create_engine, Column, String, Integer, Boolean, DateTime, Text, select
 from sqlalchemy.orm import sessionmaker, declarative_base
-from .print_ext import init_print_ext, PrintEvent
+from .print_ext import init_print_ext as _init_print_ext_197
 
 from passlib.hash import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256
 
@@ -711,7 +711,8 @@ def list_files(request: Request, q: Optional[str]=None, status: Optional[str]=No
     require_admin(request, db); cleanup_expired(db)
     page_size=100
     query = db.query(TrackingFile)
-    if q: query = query.filter(TrackingFile.tracking_no.like(f"%{q}%"))
+    if q:
+        query = query.filter(TrackingFile.tracking_no.like(f"%{q}%"))
     if status:
         query = query.filter(TrackingFile.print_status == status)
     if client:
@@ -719,14 +720,7 @@ def list_files(request: Request, q: Optional[str]=None, status: Optional[str]=No
     total = query.count()
     rows = query.order_by(TrackingFile.uploaded_at.desc()).offset((page-1)*page_size).limit(page_size).all()
     pages = max(1, math.ceil(total/page_size))
-    require_admin(request, db); cleanup_expired(db)
-    page_size=100
-    query = db.query(TrackingFile)
-    if q: query = query.filter(TrackingFile.tracking_no.like(f"%{q}%"))
-    total = query.count()
-    rows = query.order_by(TrackingFile.uploaded_at.desc()).offset((page-1)*page_size).limit(page_size).all()
-    pages = max(1, math.ceil(total/page_size))
-    return templates.TemplateResponse("files.html", {"request": request, "rows": rows, "q": q, "page": page, "pages": pages, "total": total, "page_size": page_size, "status": status, "client": client}
+    return templates.TemplateResponse("files.html", {"request": request, "rows": rows, "q": q, "status": status, "client": client, "page": page, "pages": pages, "total": total, "page_size": page_size})
 
 @app.post("/admin/files/batch_delete_all")
 def file_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_db)):
