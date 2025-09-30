@@ -65,13 +65,28 @@ if [ -z "$INSTALL_MODE" ]; then
 fi
 echo "安装模式：$INSTALL_MODE"
 
-# 系统依赖
+# ------- 修复 apt 依赖安装（处理 3.12 版本号不一致） -------
 step "安装系统依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y --no-install-recommends git curl ca-certificates tzdata python3-venv python3-pip ufw rsync unzip
+# 先装通用工具
+apt-get install -y --no-install-recommends git curl ca-certificates tzdata unzip rsync ufw || true
+# 再装 Python（稳健装法）
+if ! apt-get install -y --no-install-recommends python3 python3-pip python3-venv; then
+  warn "python3-venv 安装失败，尝试匹配候选版本..."
+  PYV="$(apt-cache policy python3.12 | awk '/Candidate:/ {print $2}')"
+  PVV="$(apt-cache policy python3.12-venv | awk '/Candidate:/ {print $2}')"
+  if [ -n "${PYV}${PVV}" ]; then
+    apt-get install -y --no-install-recommends ${PYV:+python3.12=$PYV} ${PVV:+python3.12-venv=$PVV} python3-pip || true
+  fi
+  apt-get -f install -y || true
+  # 再试一次常规与直接指明 3.12
+  apt-get install -y --no-install-recommends python3 python3-pip python3-venv || \
+  apt-get install -y --no-install-recommends python3.12 python3.12-venv python3-pip || true
+fi
+command -v python3 >/dev/null || die "系统缺少 python3，请手动修复 apt 源后重试"
 
-# 获取/更新代码（为首次部署准备 install_root.sh）
+# ------- 获取/更新代码（为首次部署准备 install_root.sh） -------
 step "获取代码到 $DEST（分支：$BRANCH）"
 if [ -d "$DEST/.git" ]; then
   git -C "$DEST" fetch --all --prune || true
@@ -84,7 +99,7 @@ else
 fi
 ok "代码准备完成"
 
-# 创建/更新 .deploy.env（放在代码更新之后，避免被 git clean 删除）
+# ------- .deploy.env 放在代码更新之后，避免被 clean 删除 -------
 step "准备 $DEST/.deploy.env（默认配置，不覆盖已有文件）"
 mkdir -p "$DEST"
 if [ ! -f "$DEST/.deploy.env" ]; then
@@ -103,7 +118,7 @@ else
   ok "$DEST/.deploy.env 已存在，保持不变"
 fi
 
-# 执行仓库内安装脚本（不要切换到 $DEST，避免被 AUTO_CLEAN 删除当前工作目录）
+# ------- 用绝对路径执行 install_root.sh，避免当前目录被删 -------
 step "执行安装脚本"
 chmod +x "$DEST/scripts/install_root.sh"
 if [ "$INSTALL_MODE" = "fresh" ]; then
@@ -112,7 +127,7 @@ else
   BASE="$DEST" bash "$DEST/scripts/install_root.sh"
 fi
 
-# 全新安装：管理员初始化（迁移网页步骤到脚本里）
+# ------- 全新安装：管理员初始化迁移到脚本 -------
 if [ "$INSTALL_MODE" = "fresh" ]; then
   step "管理员初始化（脚本内完成）"
   ask "请输入管理员账号: " ADMIN_USER
@@ -135,7 +150,10 @@ if [ "$INSTALL_MODE" = "fresh" ]; then
     ok "系统检测到已存在管理员，跳过初始化"
   else
     # 提交初始化
-    INIT_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST       --data-urlencode "username=$ADMIN_USER"       --data-urlencode "password=$ADMIN_PASS"       "http://127.0.0.1:$PORT/admin/bootstrap")" || true
+    INIT_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+      --data-urlencode "username=$ADMIN_USER" \
+      --data-urlencode "password=$ADMIN_PASS" \
+      "http://127.0.0.1:$PORT/admin/bootstrap")" || true
 
     if [ "$INIT_CODE" = "302" ]; then
       ok "管理员创建成功（已迁移到 /admin/login）"
