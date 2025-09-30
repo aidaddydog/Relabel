@@ -306,26 +306,10 @@ def cleanup_expired(db):
 
 # -------- 启动钩子：建表 + 默认管理员 --------
 def _ensure_default_admin():
-    """确保存在管理员 daddy / 20240314AaA# （幂等）"""
-    try:
-        db = SessionLocal()
-        u = db.execute(select(AdminUser).where(AdminUser.username=="daddy")).scalar_one_or_none()
-        from passlib.hash import bcrypt as _bcrypt
-        new_hash = _bcrypt.hash("20240314AaA#")
-        if not u:
-            db.add(AdminUser(username="daddy", password_hash=new_hash, is_active=True)); db.commit()
-        else:
-            try:
-                if not _bcrypt.verify("20240314AaA#", u.password_hash or ""):
-                    u.password_hash = new_hash
-            except Exception:
-                u.password_hash = new_hash
-            u.is_active = True
-            db.commit()
-        db.close()
-    except Exception as e:
-        print("ensure admin warn:", e)
-
+    """（已还原手动初始化流程）不再自动创建/重置管理员；仅保留历史兼容位。
+    初始化请访问 /admin/bootstrap 创建首个管理员。
+    """
+    return
 @app.on_event("startup")
 def _init_db():
     try:
@@ -336,8 +320,15 @@ def _init_db():
 
 # ------------------ 管理端认证与页面 ------------------
 @app.get("/admin/login", response_class=HTMLResponse)
-def login_page(request: Request):
+def login_page(request: Request, db=Depends(get_db)):
+    # 若尚无管理员，跳转到初始化页面
+    try:
+        if db.query(AdminUser).count() == 0:
+            return RedirectResponse("/admin/bootstrap", status_code=302)
+    except Exception:
+        pass
     return templates.TemplateResponse("login.html", {"request": request})
+
 
 @app.post("/admin/login")
 def login_do(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
@@ -366,11 +357,26 @@ def bootstrap_page(request: Request, db=Depends(get_db)):
 @app.post("/admin/bootstrap")
 def bootstrap_do(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
     has = db.query(AdminUser).count()
-    if has > 0: return RedirectResponse("/admin/login", status_code=302)
-    db.add(AdminUser(username=username, password_hash=bcrypt.hash(password), is_active=True)); db.commit()
-    return RedirectResponse("/admin/login", status_code=302)
+    if has > 0:
+        return RedirectResponse("/admin/login", status_code=302)
+    error = None
+    try:
+        if not username or not password:
+            error = "用户名和密码不能为空"
+        elif len(username) > 64:
+            error = "用户名过长（最多64个字符）"
+        elif db.query(AdminUser).filter(AdminUser.username==username).first():
+            error = "该用户名已存在"
+        else:
+            db.add(AdminUser(username=username, password_hash=bcrypt.hash(password), is_active=True))
+            db.commit()
+            return RedirectResponse("/admin/login", status_code=302)
+    except Exception as e:
+        db.rollback()
+        error = f"初始化失败：{e}"
+    return templates.TemplateResponse("bootstrap.html", {"request": request, "error": error}, status_code=400)
 
-# 仪表盘
+
 @app.get("/admin", response_class=HTMLResponse)
 def dashboard(request: Request, db=Depends(get_db)):
     require_admin(request, db); cleanup_expired(db)
