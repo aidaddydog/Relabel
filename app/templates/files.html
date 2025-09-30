@@ -1,4 +1,5 @@
-{% extends "layout.html" %}{% block content %}
+{% include "_nav.html" %}
+{% block content %}
 <h2>PDF 列表</h2>
 <form method="post" action="/admin/reconcile" class="row" onsubmit="return confirm('对齐文件夹与列表？这会规范化文件名并补登记缺失项。')">
   <button type="submit" class="primary">对齐文件夹与列表</button>

@@ -1,14 +1,57 @@
-{% extends "layout.html" %}{% block content %}
-<div class="title-row">
-  <form method="post" action="/admin/upload-orders-step3">
-    <button type="submit" class="primary">确认上传</button>
-  </form>
-  <h2>预览（步骤3/3：确认写入）</h2>
+<!doctype html><html><head><meta charset="utf-8"><title>订单导入预览</title></head>
+<body>
+{% include "_nav.html" %}
+<div class="container">
+  <div class="card">
+    <h2 style="margin-top:0;">导入预览（前50行）</h2>
+    <div class="helper">确认后将按下方顺序写入</div>
+    <div class="card" style="padding:0;margin-top:12px;">
+      <table class="table">
+        <tr><th>订单号</th><th>运单号</th></tr>
+        {% for r in rows %}
+          <tr><td>{{ r[0] }}</td><td>{{ r[1] }}</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div style="display:flex; gap:10px; margin-top:12px;">
+      <button id="btn" class="btn primary"><span class="spinner"></span><span>确认导入</span></button>
+    </div>
+    <pre id="log" class="card" style="margin-top:12px; background:#0f1114;"></pre>
+  </div>
 </div>
-<table class="table">
-  <thead><tr><th>#</th><th>订单</th><th>运单</th></tr></thead>
-  <tbody>
-  {% for r in rows %}<tr><td>{{loop.index}}</td><td>{{r[0]}}</td><td>{{r[1]}}</td></tr>{% endfor %}
-  </tbody>
-</table>
-{% endblock %}
+<script>
+const $ = s=>document.querySelector(s);
+const log = m => { const pre=$("#log"); pre.textContent += m+"\n"; pre.scrollTop = pre.scrollHeight; };
+const btn = $("#btn");
+btn.addEventListener("click", async () => {
+  btn.classList.add("is-loading"); btn.disabled = true;
+  $("#log").textContent = "";
+  try {
+    await new Promise((resolve, reject) => {
+      const es = new EventSource("/admin/api/orders-apply");
+      es.onmessage = (ev) => {
+        const d = JSON.parse(ev.data);
+        if (d.phase === "read") {
+          log("读取完成，待导入总数："+d.total);
+        } else if (d.phase === "progress") {
+          log(`写入进度：${d.done}/${d.total}`);
+        } else if (d.phase === "done") {
+          log(`导入完成：${d.count}`);
+          es.close();
+          alert("导入成功！");
+          window.location.href = d.redirect || "/admin/orders";
+          resolve();
+        } else if (d.phase === "error") {
+          es.close(); reject(new Error(d.msg || "导入失败"));
+        }
+      };
+      es.onerror = () => { es.close(); reject(new Error("SSE 连接中断")); };
+    });
+  } catch(e) {
+    alert(e.message || e);
+  } finally {
+    btn.classList.remove("is-loading"); btn.disabled = false;
+  }
+});
+</script>
+</body></html>
