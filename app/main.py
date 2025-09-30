@@ -13,7 +13,23 @@ from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, Text, select
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-from passlib.hash import bcrypt
+from passlib.hash import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256
+
+# ---- 密码哈希兼容层 ----
+# 使用 bcrypt_sha256 以避免 72 字节限制，同时兼容历史上用 bcrypt 生成的散列。
+def _hash_password(pw: str) -> str:
+    return _bcrypt_sha256.hash(pw)
+
+def _verify_password(pw: str, hh: str) -> bool:
+    # 先按 bcrypt_sha256 校验，失败后再回退到老的 bcrypt
+    try:
+        return _bcrypt_sha256.verify(pw, hh)
+    except Exception:
+        try:
+            return _bcrypt_legacy.verify(pw, hh)
+        except Exception:
+            return False
+
 import pandas as pd
 
 # -------- 基本路径 --------
@@ -280,7 +296,7 @@ def verify_code(db, code: str):
     rows = db.execute(select(ClientAuth).where(ClientAuth.is_active==True)).scalars().all()
     for c in rows:
         if is_locked(c): continue
-        if (c.code_plain == code) or (c.code_hash and bcrypt.verify(code, c.code_hash)):
+        if (c.code_plain == code) or (c.code_hash and _verify_password(code, c.code_hash)):
             c.last_used = datetime.utcnow(); c.fail_count = 0; c.locked_until=None; db.commit(); return c
     for c in rows:
         c.fail_count = (c.fail_count or 0) + 1
@@ -333,7 +349,7 @@ def login_page(request: Request, db=Depends(get_db)):
 @app.post("/admin/login")
 def login_do(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
     u = db.execute(select(AdminUser).where(AdminUser.username==username, AdminUser.is_active==True)).scalar_one_or_none()
-    if not u or not bcrypt.verify(password, u.password_hash):
+    if not u or not _verify_password(password, u.password_hash):
         return templates.TemplateResponse("login.html", {"request": request, "error": "账户或密码错误"})
     request.session["admin_user"] = username
     return RedirectResponse("/admin", status_code=302)
@@ -368,7 +384,7 @@ def bootstrap_do(request: Request, username: str = Form(...), password: str = Fo
         elif db.query(AdminUser).filter(AdminUser.username==username).first():
             error = "该用户名已存在"
         else:
-            db.add(AdminUser(username=username, password_hash=bcrypt.hash(password), is_active=True))
+            db.add(AdminUser(username=username, password_hash=_hash_password(password), is_active=True))
             db.commit()
             return RedirectResponse("/admin/login", status_code=302)
     except Exception as e:
