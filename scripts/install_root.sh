@@ -14,34 +14,33 @@ BACKUP_DIR="$BACKUP_ROOT/$TS"
 
 mkdir -p "$LOG_DIR" "$BACKUP_ROOT"
 exec > >(tee -a "$INSTALL_LOG") 2>&1
+
+info(){ echo "$*"; }
 step(){ echo "==> $*"; }
 ok(){ echo "✔ $*"; }
 warn(){ echo "⚠ $*"; }
 die(){ echo "✘ $*"; exit 1; }
-trap 'echo -e "✘ 安装失败（见日志：$INSTALL_LOG）\njournalctl -u huandan.service -e -n 200"; exit 1' ERR
 
-# ---- 默认值（可被 .deploy.env/环境变量覆盖）----
-REPO="${REPO:-}"; BRANCH="${BRANCH:-main}"
-BASE="${BASE:-$REPO_ROOT}"
-DATA="${DATA:-/opt/huandan-data}"
-PORT="${PORT:-8000}"; HOST="${HOST:-0.0.0.0}"
-PYBIN="${PYBIN:-python3}"
-SECRET_KEY="${SECRET_KEY:-please-change-me}"
-AUTO_CLEAN="${AUTO_CLEAN:-no}"
+# 读取环境
+[ -f "$ENV_FILE" ] && source "$ENV_FILE" || true
+: "${BASE:=${HUANDAN_BASE:-/opt/huandan-server}}"
+: "${DATA:=${HUANDAN_DATA:-/opt/huandan-data}}"
+: "${PORT:=8000}"
+: "${HOST:=0.0.0.0}"
+: "${REPO:=https://github.com/aidaddydog/huandan.server.git}"
+: "${BRANCH:=main}"
+: "${AUTO_CLEAN:=no}"
+: "${PYBIN:=${PYBIN:-python3}}"
 
-# 读取 .deploy.env
-[ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; }
-# 若在 git 仓库，自动取 origin
-[ -z "${REPO:-}" ] && [ -d "$REPO_ROOT/.git" ] && REPO="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-
-echo "BASE=$BASE DATA=$DATA PORT=$PORT HOST=$HOST REPO=${REPO:-<none>} BRANCH=$BRANCH"
-[ "$(id -u)" -eq 0 ] || die "请用 root 运行"
+info "BASE=$BASE DATA=$DATA PORT=$PORT HOST=$HOST REPO=$REPO BRANCH=$BRANCH"
 
 # 1) 依赖
 step "1) 安装系统依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y --no-install-recommends git curl ca-certificates tzdata python3-venv python3-pip rsync unzip ufw
+apt-get install -y --no-install-recommends git curl ca-certificates tzdata python3 python3-pip rsync unzip ufw
+# venv 优先尝试官方包，失败不阻断
+apt-get install -y --no-install-recommends python3-venv || apt-get install -y --no-install-recommends python3.12-venv || true
 ok "依赖安装完成"
 
 # 2) 目录
@@ -68,29 +67,37 @@ is_empty(){ [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
 if [ -d "$BASE/.git" ]; then
   git -C "$BASE" fetch --all --prune || true
   (git -C "$BASE" checkout "$BRANCH" 2>/dev/null || true)
-  git -C "$BASE" pull --ff-only || true
-elif [ -n "${REPO:-}" ]; then
-  if is_empty "$BASE"; then
+  git -C "$BASE" reset --hard "origin/$BRANCH" || true
+  git -C "$BASE" clean -fd || true
+elif is_empty "$BASE"; then
+  if [ -n "$REPO" ]; then
     git clone -b "$BRANCH" "$REPO" "$BASE"
   else
-    tmp="$(mktemp -d)"; git clone -b "$BRANCH" "$REPO" "$tmp"; rsync -a "$tmp/". "$BASE/"; rm -rf "$tmp"
+    warn "未提供 REPO，假定 $BASE 已就位"
   fi
 else
-  warn "未提供 REPO，假定 $BASE 已就位"
+  ok "代码 OK"
 fi
 ok "代码 OK"
 
 # 5) Python 依赖
 step "5) Python 依赖"
 cd "$BASE"
-$PYBIN -m venv .venv
+# 创建虚拟环境：优先 python -m venv，失败回退 virtualenv（pip 或 apt）
+if "$PYBIN" -m venv .venv 2>/dev/null; then
+  :
+else
+  "$PYBIN" -m pip install -U virtualenv || apt-get install -y --no-install-recommends python3-virtualenv || true
+  "$PYBIN" -m virtualenv .venv
+fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
-pip install -U pip wheel
+python -m pip install -U pip wheel
 if [ -f requirements.txt ]; then
   pip install -r requirements.txt
 else
-  pip install 'uvicorn[standard]' fastapi jinja2 'sqlalchemy<2.0' 'passlib[bcrypt]' pandas openpyxl 'xlrd==1.2.0' aiofiles itsdangerous python-multipart
+  # 如果没有 requirements.txt，按需安装最小集
+  pip install 'uvicorn[standard]' fastapi jinja2 'sqlalchemy<2.0' aiosqlite openpyxl 'xlrd==1.2.0' aiofiles itsdangerous python-multipart
 fi
 ok "Python 依赖 OK"
 
@@ -101,31 +108,12 @@ HUANDAN_BASE="$BASE"
 HUANDAN_DATA="$DATA"
 PORT="$PORT"
 HOST="$HOST"
-SECRET_KEY="$SECRET_KEY"
-PYTHONUNBUFFERED=1
 ENV
-chmod 0644 /etc/default/huandan
-ok "写入 /etc/default/huandan 完成"
+ok "环境文件已写入"
 
-# 7) systemd（绝对路径）
-step "7) 写入 systemd 并启动（root）"
-cat > /etc/systemd/system/huandan.service <<UNIT
-[Unit]
-Description=Huandan Server (FastAPI)
-After=network.target
-
-[Service]
-EnvironmentFile=-/etc/default/huandan
-WorkingDirectory=$BASE
-ExecStart=$BASE/.venv/bin/python $BASE/run.py
-Restart=always
-User=root
-Group=root
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
+# 7) systemd 单元
+step "7) 写入 systemd 服务并启动"
+install -D -m 0644 "$REPO_ROOT/deploy/huandan.service" /etc/systemd/system/huandan.service
 systemctl daemon-reload
 systemctl enable --now huandan.service || true
 systemctl --no-pager -l status huandan.service | sed -n '1,60p'
@@ -141,22 +129,24 @@ sys.path.insert(0, base)
 # 先确保表存在（避免服务启动与此处并发导致的 no such table）
 from app.main import Base, engine, SessionLocal, write_mapping_json, set_mapping_version
 try:
-    Base.metadata.create_all(bind=engine, checkfirst=True)
+    Base.metadata.create_all(bind=engine)
 except Exception as e:
-    print("WARN create_all:", e)
+    print("create_all warning:", e)
 
-db = SessionLocal()
-set_mapping_version(db)
-write_mapping_json(db)
-print("OK: mapping.json rebuilt & version bumped")
+# 写入 mapping.json 及版本号
+try:
+    write_mapping_json()
+    set_mapping_version()
+    print("mapping.json rebuilt")
+except Exception as e:
+    print("mapping.json rebuild warning:", e)
 PY
-ok "映射文件重建完成"
 
-# 9) UFW
-step "9) 防火墙（若 UFW=active 且 HOST=0.0.0.0）"
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active" && [ "$HOST" = "0.0.0.0" ]; then
-  ufw allow "$PORT/tcp" || true
-  ok "已放行 $PORT/tcp"
+# 9) 防火墙
+step "9) 防火墙端口"
+if command -v ufw >/dev/null && [ "${HOST}" = "0.0.0.0" ]; then
+  ufw allow "${PORT}/tcp" || true
+  ok "已放行端口 ${PORT}/tcp"
 else
   warn "UFW 未启用或 HOST 非 0.0.0.0，跳过"
 fi
