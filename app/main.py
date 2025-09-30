@@ -14,7 +14,7 @@ from sqlalchemy import text, create_engine, Column, String, Integer, Boolean, Da
 from sqlalchemy.orm import sessionmaker, declarative_base
 from .print_ext import init_print_ext as _init_print_ext_197
 
-from passlib.hash import bcrypt as _bcrypt_legacy, bcrypt_sha256 as _bcrypt_sha256, argon2 as _argon2
+from passlib.hash import argon2 as _argon2
 
 
 # ---- 登录口令哈希：Argon2id + Pepper（向后兼容 bcrypt/bcrypt_sha256）----
