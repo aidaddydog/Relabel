@@ -23,6 +23,25 @@
       </form>
     </td>
   </tr>
+  {% set devs = device_map.get(r.code_plain or '') or [] %}
+  {% if devs %}
+  <tr>
+    <td colspan="7" style="background:#fafafa">
+      <div><b>客户端子列表（{{devs|length}}）</b></div>
+      <ul>
+      {% for d in devs %}
+        <li>
+          <b>{{d.host}}</b>
+          <span>｜MAC：{{ d.mac_list|join(', ') }}</span>
+          <span>｜IP：{{ d.ip_list|join(', ') }}</span>
+          <span>｜最近：{{ d.last_seen }}</span>
+          <span>｜版本：{{ d.client_version }}</span>
+        </li>
+      {% endfor %}
+      </ul>
+    </td>
+  </tr>
+  {% endif %}
   {% endfor %}
   </tbody>
 </table>
