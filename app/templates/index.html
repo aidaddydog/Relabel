@@ -1,16 +1,46 @@
-<!doctype html><html lang="zh-CN">
+mkdir -p /opt/huandan-server/app/templates
+
+cat > /opt/huandan-server/app/templates/index.html <<'HTML'
+<!doctype html>
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <title>换单后台</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <link rel="stylesheet" href="/static/admin.css">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;color:#111}
+    .cards{display:flex;gap:16px;flex-wrap:wrap;margin:18px 0}
+    .card{padding:16px 20px;border:1px solid #e5e5e5;border-radius:10px;background:#fff;min-width:200px}
+    .n{font-size:28px;font-weight:700;margin:2px 0}
+    nav a{margin-right:12px;text-decoration:none;color:#0366d6}
+    nav a:hover{text-decoration:underline}
+    footer{margin-top:26px;color:#666;font-size:12px}
+  </style>
 </head>
 <body>
-{% include "_nav.html" %}
-<div class="container">
-  <div class="card">
-    <h2 style="margin-top:0;">欢迎</h2>
-    <p>本页为占位页。请使用上方导航进入 <a href="/admin">仪表盘</a> 或其他功能。</p>
+  <h1>换单后台</h1>
+
+  <div class="cards">
+    <div class="card">
+      <div>PDF 总数</div>
+      <div class="n">{{ count_files }}</div>
+    </div>
+    <div class="card">
+      <div>已打印 / 重复</div>
+      <div class="n">{{ printed }}</div>
+    </div>
   </div>
-</div>
-</body></html>
+
+  <nav>
+    <a href="/admin/files">PDF 列表</a>
+    <a href="/admin/clients">客户端与访问码</a>
+    <a href="/admin/logout">退出登录</a>
+  </nav>
+
+  <footer>如果页面空白或报错，请检查 /opt/huandan-server/app/templates 下的模板文件是否完整。</footer>
+</body>
+</html>
+HTML
+
+# 可选：无需重启，模板会按需加载；如要保险可重启
+systemctl restart huandan.service || true
