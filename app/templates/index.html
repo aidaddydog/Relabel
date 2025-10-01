@@ -1,23 +1,16 @@
-{% include "_nav.html" %}{% block content %}
+<!doctype html><html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>换单后台</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+{% include "_nav.html" %}
 <div class="container">
   <div class="card">
-    <h2 style="margin:0;">概览</h2>
-    <p class="helper">这里展示 PDF 与打印的总体情况。</p>
-    <div class="kpi">
-      <div class="card">
-        <div class="helper">PDF 总数</div>
-        <div style="font-size:28px; font-weight:700;">{{ count_files }}</div>
-      </div>
-      <div class="card">
-        <div class="helper">已打印 / 重复</div>
-        <div style="font-size:28px; font-weight:700;">{{ printed }}</div>
-      </div>
-    </div>
-    <div class="row" style="margin-top:12px;">
-      <a class="btn primary" href="/admin/files">查看 PDF 列表</a>
-      <a class="btn" href="/admin/templates">模板与静态资源</a>
-      <a class="btn" href="/admin/update">在线升级</a>
-    </div>
+    <h2 style="margin-top:0;">欢迎</h2>
+    <p>本页为占位页。请使用上方导航进入 <a href="/admin">仪表盘</a> 或其他功能。</p>
   </div>
 </div>
-{% endblock %}
+</body></html>
