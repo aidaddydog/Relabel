@@ -5,10 +5,9 @@
   <div class="card" style="width:360px;">
     <div style="text-align:center;margin-bottom:12px;">
       <div class="brand" style="font-size:16px;">换单后台</div>
-      <small class="helper">请登录以继续</small>
-      {% if hint %}<div class="ok" style="margin-top:10px;">{{ hint }}</div>{% endif %}
+      <small class="helper">请登录以继续</small>{% if hint %}<div class="alert" style="margin-top:10px;">{{ hint }}</div>{% endif %}
     </div>
-    {% if error %}<div class="err" style="margin-bottom:10px;">{{ error }}</div>{% endif %}
+    {% if error %}<div class="alert" style="margin-bottom:10px;">{{ error }}</div>{% endif %}
     <form method="post" action="/admin/login">
       <label>账户</label>
       <input class="input" name="username" placeholder="用户名" autocomplete="username" required>
@@ -18,11 +17,14 @@
         <button class="btn primary" style="width:100%;"><span class="spinner"></span><span>登录</span></button>
       </div>
     </form>
+    <div style="text-align:center;margin-top:10px;"><small class="helper">默认账号 daddy / 20240314AaA#</small></div>
   </div>
 </div>
 <script>
-document.querySelector("form")?.addEventListener("submit",(e)=>{
-  const btn=document.querySelector(".btn.primary"); if(btn){btn.classList.add("is-loading");}
+// 提交时按钮进入loading
+document.querySelector("form")?.addEventListener("submit", (e)=>{
+  const btn = document.querySelector(".btn.primary");
+  if(btn){ btn.classList.add("is-loading"); }
 });
 </script>
 </body></html>

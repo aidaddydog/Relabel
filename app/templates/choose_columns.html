@@ -1,14 +1,11 @@
 {% include "_nav.html" %}
-<div class="container">
-  <div class="card" style="max-width:640px;margin:0 auto;">
-    <h2 style="margin-top:0;">选择列（步骤2/3）</h2>
-    <form method="post" action="/admin/upload-orders-step2">
-      <input type="hidden" name="token" value="{{ token }}">
-      <label>订单列</label>
-      <select name="order_col" class="select">{% for c in columns %}<option value="{{c}}">{{c}}</option>{% endfor %}</select>
-      <label>运单列</label>
-      <select name="tracking_col" class="select">{% for c in columns %}<option value="{{c}}">{{c}}</option>{% endfor %}</select>
-      <button class="btn primary" type="submit">下一步</button>
-    </form>
-  </div>
-</div>
+{% block content %}
+<h2>选择列（步骤2/3）</h2>
+<form method="post" action="/admin/upload-orders-step2">
+  <label>订单列</label>
+  <select name="order_col">{% for c in columns %}<option value="{{c}}">{{c}}</option>{% endfor %}</select>
+  <label>运单列</label>
+  <select name="tracking_col">{% for c in columns %}<option value="{{c}}">{{c}}</option>{% endfor %}</select>
+  <button type="submit">下一步</button>
+</form>
+{% endblock %}

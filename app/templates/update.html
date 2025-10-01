@@ -1,36 +1,36 @@
-{% include "_nav.html" %}
-<div class="container">
-  <h2 style="margin-top:0;">在线升级</h2>
-  <div class="card">
-    {% if request.query_params.get('ok') %}
-      <div class="ok">已完成一键更新与重载。</div>
-    {% endif %}
-    {% if info.mode == "git" %}
-      <div class="grid2">
-        <div>
-          <p><b>分支：</b>{{info.branch}}</p>
-          <p><b>远端：</b><code>{{info.origin}}</code></p>
-          <p><b>本地：</b>{{info.local or "—"}}</p>
-          <p><b>远端：</b>{{info.remote or "—"}}</p>
-        </div>
-        <div>
-          <p><b>Ahead：</b>{{info.ahead}}；<b>Behind：</b>{{info.behind}}</p>
-          <form method="post" action="/admin/update/pull" style="display:inline">
-            <button class="btn">拉取</button>
-          </form>
-          <form method="post" action="/admin/update/pull-restart" style="display:inline" onsubmit="return confirm('拉取并重启服务？')">
-            <button class="btn primary">拉取并重启</button>
-          </form>
-        </div>
+{% include "_nav.html" %}{% block content %}
+<h2>在线升级</h2>
+<div class="card">
+  {% if request.query_params.get('ok') %}
+    <div class="ok">已完成一键更新与重载。</div>
+  {% endif %}
+  {% if info.mode == "git" %}
+    <div class="grid2">
+      <div>
+        <p><b>分支：</b>{{info.branch}}</p>
+        <p><b>远端：</b><code>{{info.origin}}</code></p>
+        <p><b>本地：</b>{{info.local or "—"}}</p>
+        <p><b>远端：</b>{{info.remote or "—"}}</p>
       </div>
-    {% else %}
-      <p>当前目录不是 Git 仓库，无法直接比较差异。</p>
-    {% endif %}
-  </div>
-
-  <div class="card">
-    <h3>官方一键升级脚本</h3>
-    <p>如遇复杂环境，直接执行：</p>
-    <pre class="code">bash &lt;(curl -fsSL https://raw.githubusercontent.com/didaddydog/huandan.server/main/scripts/bootstrap_online.sh)</pre>
-  </div>
+      <div>
+        <p><b>Ahead：</b>{{info.ahead}}；<b>Behind：</b>{{info.behind}}</p>
+        {% if info.behind|int > 0 %}
+          <form method="post" action="/admin/update/git_pull">
+            <button class="primary">一键拉取并应用更新</button>
+          </form>
+        {% else %}
+          <div class="muted">当前已是最新。</div>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    <p>当前目录不是 Git 仓库，无法直接比较差异。</p>
+  {% endif %}
 </div>
+
+<div class="card">
+  <h3>官方一键升级脚本</h3>
+  <p>如遇复杂环境，直接执行：</p>
+  <pre class="code">bash &lt;(curl -fsSL https://raw.githubusercontent.com/aidaddydog/huandan.server/main/scripts/bootstrap_online.sh)</pre>
+</div>
+{% endblock %}

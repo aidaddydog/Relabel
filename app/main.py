@@ -1,53 +1,125 @@
 # app/main.py
 # -*- coding: utf-8 -*-
-"""
-Huandan Server - Web 管理端（选项B：保留 _nav.html 统一导航）
-修复点：
-- /static 指向 app/static，样式/脚本不再 404
-- 统一页面模板：include _nav.html + <div class="container">
-- 补齐缺失管理页与 API：订单导入三步（含SSE）、PDF导入（含SSE）、ZIP列表、订单/文件/客户端/设置
-- 接入 admin_extras.router：模板列表/编辑、在线升级
-- /admin/bootstrap 已正式移除（用 CLI 初始化或默认账号）
-"""
-import os, io, re, sys, json, zipfile, hashlib, shutil, tempfile, asyncio
-from datetime import datetime, timedelta
+import os, io, re, sys, math, json, zipfile, hashlib, shutil, tempfile
+from datetime import datetime, timedelta, date
 from typing import Optional, List, Dict, Any, Iterable
 
-from fastapi import FastAPI, Request, Depends, UploadFile, File, Form, Query, HTTPException
-from fastapi.responses import (
-    HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse,
-    FileResponse, PlainTextResponse
-)
+from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse, FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, Text
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, Text, text, select, func
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-from passlib.context import CryptContext
+# —— 仅顶层导入 Argon2；bcrypt 系兼容在 _verify_password 中“动态导入” —— 
+from passlib.hash import argon2 as _argon2
 
-# ---------------- 基础路径 ----------------
+# =========================
+# Argon2id + Pepper 口令模块
+# =========================
+import hmac
+
+def _pepper_bytes() -> bytes:
+    """
+    读取 Pepper（推荐通过 systemd EnvironmentFile 注入）：
+      - HUANDAN_PEPPER_FILE=/etc/huandan/secret_pepper
+      - HUANDAN_PEPPER=<hex 或 明文>
+    不存在则返回空字节（仅用于兼容旧散列验证；新哈希仍强烈建议存在 Pepper）。
+    """
+    pfile = (os.environ.get("HUANDAN_PEPPER_FILE") or "").strip()
+    if pfile and os.path.exists(pfile):
+        try:
+            return open(pfile, "rb").read().strip()
+        except Exception:
+            pass
+    val = (os.environ.get("HUANDAN_PEPPER") or "").strip()
+    if not val:
+        return b""
+    try:
+        return bytes.fromhex(val)
+    except Exception:
+        return val.encode("utf-8")
+
+# Argon2id 参数：time_cost≈轮次数，memory_cost=KiB，parallelism=并行度
+_ARGON2 = _argon2.using(type="ID", time_cost=3, memory_cost=65536, parallelism=2)
+
+def _hmac_sha256(pep: bytes, pw: str) -> str:
+    return hmac.new(pep, pw.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def _is_argon2_hash(h: str) -> bool:
+    return isinstance(h, str) and h.startswith("$argon2")
+
+def _hash_password(pw: str) -> str:
+    """ 新建/重置：Argon2id(HMAC(pepper, password)) """
+    pep = _pepper_bytes()
+    payload = _hmac_sha256(pep, pw) if pep else pw
+    return _ARGON2.hash(payload)
+
+def _verify_password(pw: str, hh: str) -> bool:
+    """
+    校验顺序：
+    1) Argon2id + Pepper
+    2) 回退：按需动态导入 bcrypt_sha256 / bcrypt 校验历史散列
+    这样避免顶层 import 触发某些环境中的 bcrypt 版本兼容问题。
+    """
+    # 1) Argon2
+    try:
+        if _is_argon2_hash(hh):
+            pep = _pepper_bytes()
+            payload = _hmac_sha256(pep, pw) if pep else pw
+            return _ARGON2.verify(payload, hh)
+    except Exception:
+        pass
+    # 2) 兼容旧散列（动态导入）
+    try:
+        from passlib.hash import bcrypt_sha256 as _bcrypt_sha256
+        if _bcrypt_sha256.verify(pw, hh):
+            return True
+    except Exception:
+        pass
+    try:
+        from passlib.hash import bcrypt as _bcrypt_legacy
+        return _bcrypt_legacy.verify(pw, hh)
+    except Exception:
+        return False
+
+def _needs_rehash(hh: str) -> bool:
+    """ 非 Argon2 或 Argon2 参数过旧时应再哈希 """
+    try:
+        if not _is_argon2_hash(hh):
+            return True
+        return _ARGON2.needs_update(hh)
+    except Exception:
+        return True
+
+
+# =========================
+# FastAPI / DB 初始化
+# =========================
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
+ROOT_DIR = os.path.dirname(BASE_DIR)
 DATA_DIR = os.environ.get("HUANDAN_DATA", os.path.join(ROOT_DIR, "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(os.path.join(DATA_DIR, "pdfs"), exist_ok=True)
-os.makedirs(os.path.join(DATA_DIR, "uploads"), exist_ok=True)
-os.makedirs(os.path.join(DATA_DIR, "zips"), exist_ok=True)
 
-# 会话与模板/静态
+# 会话
 app.add_middleware(SessionMiddleware, secret_key="huandan_session_secret", session_cookie="hd_sess", https_only=False)
-app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+
+# 静态与模板
+app.mount("/static", StaticFiles(directory=os.path.join(ROOT_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-# ---------------- 数据库 ----------------
+# SQLite
 DB_PATH = os.path.join(DATA_DIR, "huandan.db")
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
+# =========================
+# 模型（保持原有字段；1.97 增打印聚合列）
+# =========================
 class AdminUser(Base):
     __tablename__ = "admin_users"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -55,29 +127,31 @@ class AdminUser(Base):
     password_hash = Column(String(256))
     is_active = Column(Boolean, default=True)
 
-class MetaKV(Base):
-    __tablename__ = "meta_kv"
-    key = Column(String(64), primary_key=True)
-    value = Column(Text, default="")
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
 class ClientAuth(Base):
     __tablename__ = "client_auth"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    code_hash = Column(String(256), default="")
-    code_plain = Column(String(16), default="")
+    code_hash = Column(String(256))
+    code_plain = Column(String(16))
     description = Column(String(128), default="")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_used = Column(DateTime, nullable=True)
+    fail_count = Column(Integer, default=0)
+    lock_until = Column(DateTime, nullable=True)
+
+class MetaKV(Base):
+    __tablename__ = "meta_kv"
+    key = Column(String(64), primary_key=True)
+    value = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 class TrackingFile(Base):
     __tablename__ = "tracking_file"
     tracking_no = Column(String(128), primary_key=True)
-    file_path = Column(Text, default="")
+    file_path = Column(Text)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
-    # 由客户端打印上报聚合的字段
-    print_status = Column(String(16), default="not_printed")   # not_printed | printed | reprinted
+    # —— 1.97 聚合列（由 print_ext 聚合上报）——
+    print_status = Column(String(16), default="not_printed")      # not_printed | printed | reprinted
     first_print_time = Column(DateTime, nullable=True)
     last_print_time = Column(DateTime, nullable=True)
     print_count = Column(Integer, default=0)
@@ -92,78 +166,61 @@ def get_db():
     finally:
         db.close()
 
-# ---------------- 密码 ----------------
-_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
-def _hash_password(pw: str) -> str:
-    return _pwd.hash(pw)
-def _verify_password(pw: str, ph: str) -> bool:
-    try:
-        return _pwd.verify(pw, ph)
-    except Exception:
-        return False
-
-# admin_cli 复用
-__all__ = ["SessionLocal", "AdminUser", "_hash_password"]
-
-# ---------------- KV ----------------
-def get_kv(db: Session, key: str, default: str = "") -> str:
+def get_kv(db, key: str, default=""):
     obj = db.get(MetaKV, key)
     return obj.value if obj and obj.value is not None else default
 
-def set_kv(db: Session, key: str, val: str):
+def set_kv(db, key: str, val: str):
     obj = db.get(MetaKV, key)
     if not obj:
         obj = MetaKV(key=key, value=val, updated_at=datetime.utcnow())
-        db.add(obj)
     else:
-        obj.value = val
-        obj.updated_at = datetime.utcnow()
-    db.commit()
+        obj.value = val; obj.updated_at = datetime.utcnow()
+    db.add(obj); db.commit()
 
-# ---------------- 会话校验 ----------------
-def _ensure_admin(request: Request) -> Optional[RedirectResponse]:
-    if not request.session.get("admin_user"):
-        return RedirectResponse("/admin/login", status_code=302)
-    return None
+def require_admin(request: Request, db):
+    u = request.session.get("admin_user")
+    if not u:
+        raise HTTPException(status_code=302, detail="unauth", headers={"Location": "/admin/login"})
+    return u
 
-# ---------------- 映射文件（订单<->追踪） ----------------
-MAP_FILE = os.path.join(DATA_DIR, "mapping.json")
+def cleanup_expired(db):
+    # 预留：可清理过期文件/失败记录等；保持空实现不影响逻辑
+    return
 
-def _load_mapping() -> Dict[str, Any]:
-    if not os.path.exists(MAP_FILE):
-        return {"version": "1.0", "mappings": []}
-    try:
-        with open(MAP_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-            if isinstance(d, dict) and "mappings" in d:
-                return d
-    except Exception:
-        pass
-    return {"version": "1.0", "mappings": []}
+# =========== 打印扩展初始化（保持原有） ===========
+from .print_ext import init_print_ext as _init_print_ext_197
 
-def _save_mapping(d: Dict[str, Any]):
-    tmp = MAP_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, MAP_FILE)
+def _verify_code(db, code: str):
+    return db.query(ClientAuth).filter(ClientAuth.code_plain==code, ClientAuth.is_active==True).first()
 
-# ---------------- 登录/登出 ----------------
+_init_print_ext_197(app, engine, SessionLocal, Base, _verify_code)
+
+# =========================
+# 登录/登出（无 Web 初始化页）
+# =========================
 @app.get("/admin/login", response_class=HTMLResponse)
 def login_page(request: Request, db=Depends(get_db)):
-    # 首次无管理员时，创建默认账号（方便首登）
-    if db.query(AdminUser).count() == 0:
-        u = AdminUser(username="daddy", password_hash=_hash_password("20240314AaA#"), is_active=True)
-        db.add(u); db.commit()
-        hint = "已自动创建默认账号：daddy / 20240314AaA#"
-    else:
-        hint = None
-    return templates.TemplateResponse("login.html", {"request": request, "hint": hint, "error": None})
+    hint = None
+    try:
+        if db.query(AdminUser).count() == 0:
+            hint = "系统尚未初始化管理员账号，请在服务器终端运行一键部署脚本完成初始化。"
+    except Exception:
+        pass
+    return templates.TemplateResponse("login.html", {"request": request, "hint": hint})
 
 @app.post("/admin/login")
-def do_login(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
-    u = db.query(AdminUser).filter(AdminUser.username == username, AdminUser.is_active == True).first()
+def login_do(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
+    u = db.execute(select(AdminUser).where(AdminUser.username==username, AdminUser.is_active==True)).scalar_one_or_none()
     if not u or not _verify_password(password, u.password_hash):
-        return templates.TemplateResponse("login.html", {"request": request, "error": "账户或密码错误", "hint": None})
+        return templates.TemplateResponse("login.html", {"request": request, "error": "账户或密码错误"})
+    # 自动再哈希：统一升级到 Argon2id + Pepper
+    try:
+        if _needs_rehash(u.password_hash):
+            u.password_hash = _hash_password(password)
+            db.add(u); db.commit()
+    except Exception:
+        db.rollback()
     request.session["admin_user"] = username
     return RedirectResponse("/admin", status_code=302)
 
@@ -172,37 +229,31 @@ def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/admin/login", status_code=302)
 
-# ---------------- 仪表盘 ----------------
+# =========================
+# 管理页：仪表盘
+# =========================
 @app.get("/admin", response_class=HTMLResponse)
-def dashboard(request: Request, db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    mapping = _load_mapping()
-    stats = {
-        "order_count": len(mapping.get("mappings", [])),
-        "file_count": db.query(TrackingFile).count(),
-        "client_count": db.query(ClientAuth).count(),
-        "version": mapping.get("version") or "1.0",
-        "server_version": get_kv(db, "server_version", "1.97"),
-        "client_recommend": get_kv(db, "client_recommend", "1.97"),
-        "o_days": get_kv(db, "retention_orders_days", "90"),
-        "f_days": get_kv(db, "retention_files_days", "90"),
-    }
-    return templates.TemplateResponse("dashboard.html", {"request": request, "stats": stats})
+def admin_home(request: Request, db=Depends(get_db)):
+    require_admin(request, db)
+    count_files = db.query(TrackingFile).count()
+    printed = db.query(TrackingFile).filter(TrackingFile.print_status!="not_printed").count()
+    return templates.TemplateResponse("index.html", {"request": request, "count_files": count_files, "printed": printed})
 
-# ---------------- PDF 文件列表 + 对齐 ----------------
+# =========================
+# 管理页：PDF 列表（含筛选；修复 TemplateResponse 闭合）
+# =========================
 @app.get("/admin/files", response_class=HTMLResponse)
 def list_files(request: Request,
                q: Optional[str]=None,
                status: Optional[str]=None,
                client: Optional[str]=None,
-               bind: Optional[str]=None,  # bound | unbound | None
+               bind: Optional[str]=None, # bound | unbound | None
                page: int = 1,
                db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
+    require_admin(request, db); cleanup_expired(db)
     page_size = 100
 
+    # 基础过滤
     base_q = db.query(TrackingFile)
     if q:
         base_q = base_q.filter(TrackingFile.tracking_no.like(f"%{q}%"))
@@ -211,50 +262,96 @@ def list_files(request: Request,
     if client:
         base_q = base_q.filter(TrackingFile.last_print_client_name.like(f"%{client}%"))
 
-    # 读取 mapping.json，构造 bound 集合
-    m = _load_mapping()
-    order_map: Dict[str, str] = {}
-    for r in m.get("mappings", []):
-        tn = (r.get("tracking_no") or "").strip()
-        oid = (r.get("order_id") or r.get("customer_order") or "").strip()
-        if tn and oid and tn not in order_map:
-            order_map[tn] = oid
+    # 候选 tracking_no
+    cand_tns = [r[0] for r in base_q.with_entities(TrackingFile.tracking_no).order_by(TrackingFile.uploaded_at.desc()).all()]
 
+    # 已绑定集合（order_mapping + print_events）
+    bound_set = set()
+    if cand_tns:
+        try:
+            rs = db.execute(text("SELECT tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(tracking_no,'')<>''"),
+                            {"tn": tuple(cand_tns)}).fetchall()
+            bound_set.update([r[0] for r in rs if r and r[0]])
+        except Exception:
+            pass
+        try:
+            rs = db.execute(text("SELECT tracking_no FROM print_events WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' GROUP BY tracking_no"),
+                            {"tn": tuple(cand_tns)}).fetchall()
+            bound_set.update([r[0] for r in rs if r and r[0]])
+        except Exception:
+            pass
+
+    # 应用绑定筛选
     if bind == "bound":
-        base_q = base_q.filter(TrackingFile.tracking_no.in_(list(order_map.keys())))
+        filtered = [tn for tn in cand_tns if tn in bound_set]
     elif bind == "unbound":
-        if order_map:
-            base_q = base_q.filter(~TrackingFile.tracking_no.in_(list(order_map.keys())))
+        filtered = [tn for tn in cand_tns if tn not in bound_set]
+    else:
+        filtered = cand_tns
 
-    total = base_q.count()
-    pages = max(1, (total + page_size - 1) // page_size)
-    page = max(1, min(page, pages))
-    rows = base_q.order_by(TrackingFile.uploaded_at.desc()) \
-                 .offset((page - 1) * page_size).limit(page_size).all()
+    total = len(filtered)
+    pages = max(1, math.ceil(total / page_size))
+    page = max(1, min(pages, int(page or 1)))
+    page_tns = filtered[(page-1)*page_size : page*page_size]
 
-    # 附加信息（状态中文等）
-    extras: Dict[str, Dict[str, str]] = {}
-    for r in rows:
-        st_cn = "未打印"
-        if r.print_status == "printed": st_cn = "已打印"
-        elif r.print_status == "reprinted": st_cn = "重复打印"
-        extras[r.tracking_no] = {
-            "order_id": order_map.get(r.tracking_no, ""),
-            "status_cn": st_cn,
-            "reprint_reason": ""   # 如需显示重复原因，可在客户端上报同步到服务器后填充
-        }
+    rows: List[TrackingFile] = []
+    if page_tns:
+        rows = db.query(TrackingFile).filter(TrackingFile.tracking_no.in_(page_tns)).order_by(TrackingFile.uploaded_at.desc()).all()
+
+    # extras：订单号、最近一次重印原因、中文状态
+    extras: Dict[str, Dict[str, Any]] = {}
+    if page_tns:
+        order_map: Dict[str,str] = {}
+        # 订单号（order_mapping 优先）
+        try:
+            rs = db.execute(text("SELECT order_id, tracking_no FROM order_mapping WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' ORDER BY updated_at DESC"),
+                            {"tn": tuple(page_tns)}).fetchall()
+            for oid, tn in rs:
+                if tn and tn not in order_map:
+                    order_map[tn] = oid
+        except Exception:
+            pass
+        try:
+            rs = db.execute(text("SELECT tracking_no, order_id FROM print_events WHERE tracking_no IN :tn AND ifnull(order_id,'')<>'' ORDER BY created_at DESC"),
+                            {"tn": tuple(page_tns)}).fetchall()
+            for tn, oid in rs:
+                if tn and tn not in order_map and oid:
+                    order_map[tn] = oid
+        except Exception:
+            pass
+
+        # 重印原因（最近一次）
+        reprint_reason: Dict[str,str] = {}
+        try:
+            rs = db.execute(text("SELECT tracking_no, reprint_reason FROM print_events WHERE tracking_no IN :tn AND result='success_reprint' AND ifnull(reprint_reason,'')<>'' ORDER BY created_at DESC"),
+                            {"tn": tuple(page_tns)}).fetchall()
+            for tn, why in rs:
+                if tn and tn not in reprint_reason:
+                    reprint_reason[tn] = why
+        except Exception:
+            pass
+
+        cn = {"not_printed":"未打印","printed":"已打印","reprinted":"重复打印"}
+        status_map = {r.tracking_no: cn.get(r.print_status or "not_printed", "未打印") for r in rows}
+
+        for tn in page_tns:
+            extras[tn] = {
+                "order_id": order_map.get(tn, ""),
+                "reprint_reason": reprint_reason.get(tn, ""),
+                "status_cn": status_map.get(tn, "未打印"),
+            }
 
     return templates.TemplateResponse("files.html", {
-        "request": request,
-        "rows": rows, "extras": extras,
-        "q": q or "", "status": status or "", "client": client or "", "bind": bind or "",
-        "page": page, "pages": pages, "page_size": page_size, "total": total
+        "request": request, "rows": rows,
+        "q": q, "status": status, "client": client, "bind": bind,
+        "page": page, "pages": pages, "total": total, "page_size": page_size,
+        "extras": extras
     })
 
+# ——（如你模板里有“导出”按钮，可保留/实现；否则可以忽略此路由）——
 @app.get("/admin/files/export-xlsx")
 def files_export_xlsx(request: Request, db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
+    require_admin(request, db)
     try:
         import pandas as pd
     except Exception:
@@ -265,396 +362,63 @@ def files_export_xlsx(request: Request, db=Depends(get_db)):
         "uploaded_at": (r.uploaded_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S"),
         "print_status": r.print_status,
         "print_count": r.print_count,
-        "last_print_time": (r.last_print_time or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S"),
-        "last_print_client_name": r.last_print_client_name or "",
+        "last_print_time": (r.last_print_time or ""),
+        "last_print_client_name": r.last_print_client_name or ""
     } for r in q]
-    import io as _io
-    buf = _io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
-        pd.DataFrame(rows).to_excel(w, index=False, sheet_name="files")
+    df = pd.DataFrame(rows)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as wr:
+        df.to_excel(wr, index=False, sheet_name="files")
     buf.seek(0)
     headers = {"Content-Disposition": "attachment; filename=files.xlsx"}
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
-@app.post("/admin/reconcile")
-def reconcile_files(request: Request, db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    pdf_dir = os.path.join(DATA_DIR, "pdfs")
-    os.makedirs(pdf_dir, exist_ok=True)
-    files = []
-    for root, _, fs in os.walk(pdf_dir):
-        for name in fs:
-            if name.lower().endswith(".pdf"):
-                files.append(os.path.join(root, name))
-    # 规范化文件名：<TRACKING_NO>.pdf
-    for fp in files:
-        dn, name = os.path.dirname(fp), os.path.basename(fp)
-        tn = os.path.splitext(name)[0]
-        # 仅保留字母数字与横杆/下划线
-        norm_tn = re.sub(r"[^0-9A-Za-z_-]", "", tn)
-        norm_name = f"{norm_tn}.pdf"
-        if name != norm_name:
-            dst = os.path.join(dn, norm_name)
-            if not os.path.exists(dst):
-                os.rename(fp, dst)
-    # 补登记
-    for name in os.listdir(pdf_dir):
-        if not name.lower().endswith(".pdf"): continue
-        tn = os.path.splitext(name)[0]
-        row = db.get(TrackingFile, tn)
-        if not row:
-            db.add(TrackingFile(tracking_no=tn, file_path=os.path.join("pdfs", name), uploaded_at=datetime.utcnow()))
-    db.commit()
-    return RedirectResponse("/admin/files", status_code=302)
+# =========================
+# 客户端必需 API（保持兼容）
+# =========================
 
-# ---------------- 订单列表（基于 mapping.json） ----------------
-@app.get("/admin/orders", response_class=HTMLResponse)
-def orders_page(request: Request, q: Optional[str]=None, page: int = 1, db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    m = _load_mapping()
-    rows = m.get("mappings", [])
-    if q:
-        k = q.strip().lower()
-        rows = [r for r in rows if k in (r.get("order_id","")+r.get("customer_order","")+r.get("tracking_no","")).lower()]
-    rows = list(reversed(rows))  # 新的在前
-    page_size = 100
-    total = len(rows)
-    pages = max(1, (total + page_size - 1)//page_size)
-    page = max(1, min(page, pages))
-    page_rows = rows[(page-1)*page_size: page*page_size]
-    return templates.TemplateResponse("orders.html", {
-        "request": request, "rows": page_rows,
-        "q": q or "", "page": page, "pages": pages, "total": total
-    })
-
-@app.get("/admin/orders/export-xlsx")
-def orders_export(request: Request):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    try:
-        import pandas as pd
-    except Exception:
-        return PlainTextResponse("需要 pandas 以导出 xlsx", status_code=500)
-    m = _load_mapping()
-    df = pd.DataFrame(m.get("mappings", []))
-    import io as _io
-    buf = _io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
-        df.to_excel(w, index=False, sheet_name="mappings")
-    buf.seek(0)
-    headers = {"Content-Disposition": "attachment; filename=orders-mapping.xlsx"}
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
-
-@app.post("/admin/orders/edit-binding")
-def orders_edit_binding(request: Request, tracking_no: str = Form(...), order_id: str = Form(""), customer_order: str = Form("")):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    m = _load_mapping()
-    arr = m.get("mappings", [])
-    found = False
-    for r in arr:
-        if (r.get("tracking_no") or "").strip() == tracking_no.strip():
-            r["order_id"] = order_id.strip()
-            r["customer_order"] = customer_order.strip()
-            found = True
-            break
-    if not found:
-        arr.append({"order_id": order_id.strip(), "customer_order": customer_order.strip(), "tracking_no": tracking_no.strip()})
-    m["version"] = datetime.utcnow().isoformat(timespec="seconds")
-    _save_mapping(m)
-    return RedirectResponse("/admin/orders", status_code=302)
-
-@app.post("/admin/orders/unbind")
-def orders_unbind(request: Request, tracking_no: str = Form(...)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    m = _load_mapping()
-    arr = [r for r in m.get("mappings", []) if (r.get("tracking_no") or "").strip() != tracking_no.strip()]
-    m["mappings"] = arr
-    m["version"] = datetime.utcnow().isoformat(timespec="seconds")
-    _save_mapping(m)
-    return RedirectResponse("/admin/orders", status_code=302)
-
-@app.post("/admin/orders/batch_delete_all")
-def orders_batch_delete(request: Request, q: str = Form("")):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    m = _load_mapping()
-    if q:
-        k = q.strip().lower()
-        arr = [r for r in m.get("mappings", []) if k not in (r.get("order_id","")+r.get("customer_order","")+r.get("tracking_no","")).lower()]
-    else:
-        arr = []
-    m["mappings"] = arr
-    m["version"] = datetime.utcnow().isoformat(timespec="seconds")
-    _save_mapping(m)
-    return RedirectResponse("/admin/orders", status_code=302)
-
-# ---------------- 订单导入（3步 + SSE 应用） ----------------
-@app.get("/admin/upload-orders", response_class=HTMLResponse)
-def upload_orders_page(request: Request):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    return templates.TemplateResponse("upload_orders.html", {"request": request, "err": ""})
-
-@app.post("/admin/upload-orders-step1")
-async def upload_orders_step1(request: Request, file: UploadFile = File(...)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    try:
-        import pandas as pd
-    except Exception:
-        return templates.TemplateResponse("upload_orders.html", {"request": request, "err": "需要 pandas/openpyxl 才能解析 Excel/CSV"})
-    suffix = (file.filename or "").lower()
-    buf = await file.read()
-    tmp_dir = os.path.join(DATA_DIR, "uploads"); os.makedirs(tmp_dir, exist_ok=True)
-    token = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-    tmp_path = os.path.join(tmp_dir, f"orders-{token}")
-    with open(tmp_path, "wb") as f:
-        f.write(buf)
-    # 读列名
-    try:
-        if suffix.endswith(".csv"):
-            df = pd.read_csv(tmp_path, nrows=50)
-        else:
-            df = pd.read_excel(tmp_path, nrows=50)
-    except Exception as e:
-        return templates.TemplateResponse("upload_orders.html", {"request": request, "err": f"文件解析失败：{e}"})
-    cols = list(df.columns)
-    return templates.TemplateResponse("choose_columns.html", {"request": request, "columns": cols, "token": token})
-
-@app.post("/admin/upload-orders-step2")
-def upload_orders_step2(request: Request, order_col: str = Form(...), tracking_col: str = Form(...), token: str = Form(...)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    import pandas as pd
-    tmp_path = os.path.join(DATA_DIR, "uploads", f"orders-{token}")
-    if not os.path.exists(tmp_path):
-        return templates.TemplateResponse("upload_orders.html", {"request": request, "err": "临时文件不存在或已过期"})
-    # 展示前50行预览
-    try:
-        if tmp_path.lower().endswith(".csv"):
-            df = pd.read_csv(tmp_path, dtype=str)
-        else:
-            df = pd.read_excel(tmp_path, dtype=str)
-    except Exception as e:
-        return templates.TemplateResponse("upload_orders.html", {"request": request, "err": f"文件解析失败：{e}"})
-    rows = []
-    for i, r in df.head(50).iterrows():
-        rows.append([(str(r.get(order_col) or "")).strip(), (str(r.get(tracking_col) or "")).strip()])
-    return templates.TemplateResponse("preview_orders.html", {"request": request, "rows": rows, "token": token, "order_col": order_col, "tracking_col": tracking_col})
-
-@app.get("/admin/api/orders-apply")
-async def orders_apply(request: Request, token: str, order_col: str = Query(...), tracking_col: str = Query(...)):
-    # SSE：读取临时文件，写入 mapping.json
-    async def gen():
-        try:
-            import pandas as pd
-        except Exception:
-            yield f"data: {json.dumps({'phase':'error','msg':'需要 pandas/openpyxl'})}\n\n"
-            return
-        tmp_path = os.path.join(DATA_DIR, "uploads", f"orders-{token}")
-        if not os.path.exists(tmp_path):
-            yield f"data: {json.dumps({'phase':'error','msg':'临时文件不存在或已过期'})}\n\n"
-            return
-        if tmp_path.lower().endswith(".csv"):
-            df = pd.read_csv(tmp_path, dtype=str)
-        else:
-            df = pd.read_excel(tmp_path, dtype=str)
-        total = len(df)
-        yield f"data: {json.dumps({'phase':'read','total':total})}\n\n"
-        m = _load_mapping()
-        arr = m.get("mappings", [])
-        done = 0
-        for _, r in df.iterrows():
-            oid = (str(r.get(order_col) or "")).strip()
-            tn  = (str(r.get(tracking_col) or "")).strip()
-            if not tn or not oid: 
-                continue
-            # 去重：同 tracking_no 只保留最新
-            kept = [x for x in arr if (x.get("tracking_no") or "") != tn]
-            kept.append({"order_id": oid, "customer_order": "", "tracking_no": tn})
-            arr = kept
-            done += 1
-            if done % 50 == 0:
-                yield f"data: {json.dumps({'phase':'progress','done':done,'total':total})}\n\n"
-                await asyncio.sleep(0.001)
-                if await request.is_disconnected(): return
-        m["mappings"] = arr
-        m["version"] = datetime.utcnow().isoformat(timespec="seconds")
-        _save_mapping(m)
-        yield f"data: {json.dumps({'phase':'done','count':done})}\n\n"
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-# ---------------- PDF 导入（上传 + SSE 应用） ----------------
-@app.get("/admin/upload-pdf", response_class=HTMLResponse)
-def upload_pdf_page(request: Request):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    return templates.TemplateResponse("upload_pdf.html", {"request": request})
-
-@app.post("/admin/api/upload-pdf-file")
-async def api_upload_pdf_file(request: Request, zipfile_upload: UploadFile = File(...)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    fn = zipfile_upload.filename or "upload.zip"
-    token = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-    tmp = os.path.join(DATA_DIR, "uploads", f"pdfs-{token}.zip")
-    buf = await zipfile_upload.read()
-    with open(tmp, "wb") as f:
-        f.write(buf)
-    return JSONResponse({"ok": True, "tmp": os.path.basename(tmp), "name": fn, "size": len(buf)})
-
-@app.get("/admin/api/upload-pdf-apply")
-async def api_upload_pdf_apply(request: Request, tmp: str):
-    async def gen():
-        zip_path = os.path.join(DATA_DIR, "uploads", tmp)
-        if not os.path.exists(zip_path):
-            yield f"data: {json.dumps({'phase':'error','msg':'临时压缩包不存在'})}\n\n"; return
-        pdf_dir = os.path.join(DATA_DIR, "pdfs")
-        os.makedirs(pdf_dir, exist_ok=True)
-        # 读取 zip
-        try:
-            with zipfile.ZipFile(zip_path) as zf:
-                names = [n for n in zf.namelist() if n.lower().endswith(".pdf")]
-                total = len(names)
-                done = 0
-                yield f"data: {json.dumps({'phase':'read','total':total})}\n\n"
-                for n in names:
-                    data = zf.read(n)
-                    base = os.path.basename(n)
-                    tn = os.path.splitext(base)[0]
-                    tn = re.sub(r"[^0-9A-Za-z_-]", "", tn)
-                    dst = os.path.join(pdf_dir, f"{tn}.pdf")
-                    with open(dst, "wb") as f:
-                        f.write(data)
-                    # 登记/更新
-                    with SessionLocal() as db:
-                        row = db.get(TrackingFile, tn)
-                        if not row:
-                            db.add(TrackingFile(tracking_no=tn, file_path=os.path.join("pdfs", f"{tn}.pdf"), uploaded_at=datetime.utcnow()))
-                        else:
-                            row.file_path = os.path.join("pdfs", f"{tn}.pdf")
-                            row.uploaded_at = datetime.utcnow()
-                        db.commit()
-                    done += 1
-                    if done % 20 == 0:
-                        yield f"data: {json.dumps({'phase':'progress','done':done,'total':total})}\n\n"
-                        await asyncio.sleep(0.001)
-                        if await request.is_disconnected(): return
-        except Exception as e:
-            yield f"data: {json.dumps({'phase':'error','msg':str(e)})}\n\n"; return
-        yield f"data: {json.dumps({'phase':'done'})}\n\n"
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-# ---------------- ZIP 列表 ----------------
-@app.get("/admin/zips", response_class=HTMLResponse)
-def zips_page(request: Request):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    zdir = os.path.join(DATA_DIR, "zips")
-    rows = []
-    try:
-        for name in sorted(os.listdir(zdir), reverse=True):
-            if name.startswith("pdfs-") and name.endswith(".zip"):
-                ymd = name[5:13]
-                if len(ymd) == 8 and ymd.isdecimal():
-                    date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
-                    size = os.path.getsize(os.path.join(zdir, name))
-                    rows.append({"date": date, "zip_name": name, "size": size})
-    except Exception:
-        pass
-    return templates.TemplateResponse("zips.html", {"request": request, "rows": rows})
-
-# ---------------- 客户端访问码 ----------------
-@app.get("/admin/clients", response_class=HTMLResponse)
-def clients_page(request: Request, db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    rows = db.query(ClientAuth).order_by(ClientAuth.id.desc()).all()
-    return templates.TemplateResponse("clients.html", {"request": request, "rows": rows})
-
-@app.post("/admin/clients/add")
-def clients_add(request: Request, code6: str = Form(""), description: str = Form(""), db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    code6 = re.sub(r"\D", "", code6 or "")[:6]
-    if not code6:
-        return RedirectResponse("/admin/clients", status_code=302)
-    db.add(ClientAuth(code_plain=code6, description=description.strip(), is_active=True, created_at=datetime.utcnow()))
-    db.commit()
-    return RedirectResponse("/admin/clients", status_code=302)
-
-@app.post("/admin/clients/toggle")
-def clients_toggle(request: Request, id: int = Form(...), db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    r = db.get(ClientAuth, id)
-    if r:
-        r.is_active = not r.is_active
-        db.commit()
-    return RedirectResponse("/admin/clients", status_code=302)
-
-@app.post("/admin/clients/delete")
-def clients_delete(request: Request, id: int = Form(...), db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    r = db.get(ClientAuth, id)
-    if r:
-        db.delete(r); db.commit()
-    return RedirectResponse("/admin/clients", status_code=302)
-
-# ---------------- 设置 ----------------
-@app.get("/admin/settings", response_class=HTMLResponse)
-def settings_page(request: Request, db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    return templates.TemplateResponse("settings.html", {
-        "request": request,
-        "o_days": get_kv(db, "retention_orders_days", "90"),
-        "f_days": get_kv(db, "retention_files_days", "90"),
-        "server_version": get_kv(db, "server_version", "1.97"),
-        "client_recommend": get_kv(db, "client_recommend", "1.97"),
-    })
-
-@app.post("/admin/settings")
-def settings_save(request: Request,
-                  retention_orders_days: str = Form("90"),
-                  retention_files_days: str = Form("90"),
-                  server_version: str = Form("1.97"),
-                  client_recommend: str = Form("1.97"),
-                  db=Depends(get_db)):
-    redir = _ensure_admin(request)
-    if redir: return redir
-    set_kv(db, "retention_orders_days", retention_orders_days.strip())
-    set_kv(db, "retention_files_days", retention_files_days.strip())
-    set_kv(db, "server_version", server_version.strip())
-    set_kv(db, "client_recommend", client_recommend.strip())
-    return RedirectResponse("/admin/settings", status_code=302)
-
-# ---------------- 客户端兼容 API ----------------
 @app.get("/api/v1/version")
-def api_version(code: str = Query(...), db=Depends(get_db)):
-    return {"version": get_kv(db, "server_version", "1.97")}
+def api_version(code: str, db=Depends(get_db)):
+    # 可按 access_code 做鉴权；此处保持原样返回 KV 里的版本号（缺省 "1.97"）
+    v = get_kv(db, "version", "1.97")
+    return {"version": v}
 
 @app.get("/api/v1/mapping")
-def api_mapping(code: str = Query(...)):
-    d = _load_mapping()
-    if "version" not in d: d["version"] = "1.0"
-    if "mappings" not in d: d["mappings"] = []
+def api_mapping(code: str, db=Depends(get_db)):
+    """
+    返回“订单号 <-> 追踪号”映射与版本号。
+    为保持最小改动，优先从 data/mapping.json 读取（若无则返回空列表）。
+    文件格式举例：
+      {"version":"2025-10-01T12:00:00","mappings":[{"order_id":"...","customer_order":"...","tracking_no":"..."}]}
+    """
+    mapping_file = os.path.join(DATA_DIR, "mapping.json")
+    d = {"version": get_kv(db, "version", "1.97"), "mappings": []}
+    try:
+        if os.path.exists(mapping_file):
+            with open(mapping_file, "r", encoding="utf-8") as f:
+                jd = json.load(f)
+                if isinstance(jd, dict):
+                    d["version"] = str(jd.get("version") or d["version"])
+                    ms = jd.get("mappings") or []
+                    # 统一键名（tracking_no / order_id / customer_order）
+                    out = []
+                    for r in ms:
+                        if not isinstance(r, dict): continue
+                        out.append({
+                            "order_id": r.get("order_id") or r.get("order") or "",
+                            "customer_order": r.get("customer_order") or r.get("order_no") or "",
+                            "tracking_no": r.get("tracking_no") or r.get("hawb") or r.get("waybill") or r.get("tracking") or ""
+                        })
+                    d["mappings"] = out
+    except Exception:
+        pass
     return d
 
-def _file_sha256(fp: str) -> str:
-    h = hashlib.sha256()
-    with open(fp, "rb") as f:
-        for chunk in iter(lambda: f.read(4*1024*1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
 @app.get("/api/v1/pdf-zips/dates")
-def api_zip_dates(code: str = Query(...)):
+def api_zip_dates(code: str, db=Depends(get_db)):
+    """
+    枚举 zips 目录下的 pdfs-YYYYMMDD.zip，返回日期数组（YYYY-MM-DD）
+    """
     zdir = os.path.join(DATA_DIR, "zips")
     out = []
     try:
@@ -665,30 +429,53 @@ def api_zip_dates(code: str = Query(...)):
                 out.append(f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}")
     except Exception:
         pass
-    return {"dates": sorted(set(out))}
+    out = sorted(set(out))
+    return {"dates": out}
+
+def _file_etag_sha256(fp: str) -> str:
+    h = hashlib.sha256()
+    with open(fp, "rb") as f:
+        for chunk in iter(lambda: f.read(4*1024*1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 @app.get("/api/v1/pdf-zips/daily")
-def api_zip_daily(date: str = Query(..., regex=r"^\d{4}-\d{2}-\d{2}$"), code: str = Query(...)):
+def api_zip_daily(date: str = Query(..., regex=r"^\d{4}-\d{2}-\d{2}$"), code: str = Query(...), db=Depends(get_db)):
+    """
+    直接返回 zips/pdf-YYYYMMDD.zip；附带 ETag 与 X-Checksum-SHA256 供客户端缓存。
+    """
     zdir = os.path.join(DATA_DIR, "zips")
     zname = f"pdfs-{date.replace('-','')}.zip"
     fpath = os.path.join(zdir, zname)
     if not os.path.exists(fpath):
-        raise HTTPException(status_code=404, detail="not found")
+        raise HTTPException(status_code=404, detail="zip not found")
+    sha = _file_etag_sha256(fpath)
     headers = {
-        "ETag": _file_sha256(fpath),
-        "X-Checksum-SHA256": _file_sha256(fpath),
-        "Content-Disposition": f'attachment; filename="{zname}"',
+        "ETag": sha[:32],
+        "X-Checksum-SHA256": sha
     }
-    return FileResponse(fpath, media_type="application/zip", headers=headers)
+    return FileResponse(fpath, filename=zname, media_type="application/zip", headers=headers)
 
-# ---------------- 健康检查 ----------------
+@app.get("/api/v1/runtime/sumatra")
+def api_runtime_sumatra(arch: str = Query(..., regex=r"^win(32|64)$"), code: str = Query(...), db=Depends(get_db)):
+    """
+    供客户端兜底下载 SumatraPDF。
+    路径：runtime/SumatraPDF-<arch>.exe
+    """
+    fname = f"SumatraPDF-{arch}.exe"
+    fpath = os.path.join(ROOT_DIR, "runtime", fname)
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail="runtime not found")
+    return FileResponse(fpath, filename="SumatraPDF.exe", media_type="application/octet-stream")
+
+# =========================
+# 兼容：删除 Web 初始化页（不再提供 /admin/bootstrap）
+# =========================
+# （无代码：此处仅说明已移除。若仍有旧模板 bootstrap.html，部署脚本会删除）
+
+# =========================
+# 健康检查
+# =========================
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "time": datetime.utcnow().isoformat(timespec="seconds")}
-
-# ---------------- 接入 admin_extras（模板/在线升级） ----------------
-try:
-    from .admin_extras import router as admin_extras_router
-    app.include_router(admin_extras_router)
-except Exception as e:
-    print("WARN: admin_extras not loaded:", e, file=sys.stderr)

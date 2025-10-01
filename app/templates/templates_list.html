@@ -1,56 +1,55 @@
-{% include "_nav.html" %}
-<div class="container">
-  <h2 style="margin-top:0;">模板与静态资源</h2>
-  {% if pushed == '1' %}<div class="ok">已提交并推送到仓库。</div>{% endif %}
-  {% if err %}<div class="err">{{err}}</div>{% endif %}
+{% include "_nav.html" %}{% block content %}
+<h2>模板与静态资源</h2>
 
-  <div class="card">
-    <h3>提交到仓库</h3>
-    <form method="post" action="/admin/templates/git_push" class="row">
-      <input class="input" name="message" placeholder="提交说明" value="web-edit: update templates" style="flex:1">
-      <button class="btn primary" type="submit">一键回传到仓库</button>
-    </form>
-    {% if info.mode == 'git' %}
-      <div class="muted">分支：{{info.branch}}；远端：<code>{{info.origin or ''}}</code>；本地 ahead:{{info.ahead}} / behind:{{info.behind}}</div>
-    {% else %}
-      <div class="muted">当前目录不是 Git 仓库，不能推送。</div>
-    {% endif %}
-  </div>
+{% if pushed == '1' %}<div class="ok">已提交并推送到仓库。</div>{% endif %}
+{% if err %}<div class="err">{{err}}</div>{% endif %}
 
-  <div class="grid2">
-    <div class="card">
-      <h3>模板文件</h3>
-      <table class="table">
-        <thead><tr><th>名称</th><th>相对路径</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
-        <tbody>
-        {% for r in tpls %}
-          <tr>
-            <td>{{r.cn}}</td>
-            <td><code>{{r.rel}}</code></td>
-            <td>{{r.size}}</td>
-            <td>{{r.mtime}}</td>
-            <td><a class="btn" href="/admin/templates/edit?kind=tpl&path={{r.rel}}">编辑</a></td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    <div class="card">
-      <h3>静态资源</h3>
-      <table class="table">
-        <thead><tr><th>名称</th><th>相对路径</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
-        <tbody>
-        {% for r in assets %}
-          <tr>
-            <td>{{r.cn}}</td>
-            <td><code>{{r.rel}}</code></td>
-            <td>{{r.size}}</td>
-            <td>{{r.mtime}}</td>
-            <td><a class="btn" href="/admin/templates/edit?kind=static&path={{r.rel}}">编辑</a></td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
+<div class="card">
+  <h3>提交到仓库</h3>
+  <form method="post" action="/admin/templates/git_push" class="row">
+    <input name="message" placeholder="提交说明" value="web-edit: update templates" style="flex:1">
+    <button type="submit" class="primary">一键回传到仓库</button>
+  </form>
+  {% if info.mode == 'git' %}
+    <div class="muted">分支：{{info.branch}}；远端：<code>{{info.origin}}</code>；本地 ahead:{{info.ahead}} / behind:{{info.behind}}</div>
+  {% else %}
+    <div class="muted">当前目录不是 Git 仓库，不能推送。</div>
+  {% endif %}
 </div>
+
+<div class="card">
+  <h3>HTML 模板（app/templates）</h3>
+  <table class="table">
+    <thead><tr><th>中文名</th><th>文件</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
+    <tbody>
+    {% for r in tpls %}
+      <tr>
+        <td>{{r.cn}}</td>
+        <td><code>{{r.rel}}</code></td>
+        <td>{{r.size}}</td>
+        <td>{{r.mtime}}</td>
+        <td><a class="btn" href="/admin/templates/edit?kind=tpl&path={{r.rel}}">编辑</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>CSS/JS（app/static）</h3>
+  <table class="table">
+    <thead><tr><th>中文名</th><th>文件</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
+    <tbody>
+    {% for r in assets %}
+      <tr>
+        <td>{{r.cn}}</td>
+        <td><code>{{r.rel}}</code></td>
+        <td>{{r.size}}</td>
+        <td>{{r.mtime}}</td>
+        <td><a class="btn" href="/admin/templates/edit?kind=static&path={{r.rel}}">编辑</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
