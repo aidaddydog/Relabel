@@ -1,15 +1,17 @@
 {% include "_nav.html" %}
-{% block content %}
-<h2>系统设置</h2>
-<form method="post" action="/admin/settings" class="grid2">
+<div class="container">
   <div class="card">
-    <label>订单保留天</label><input name="retention_orders_days" value="{{o_days}}">
-    <label>PDF保留天</label><input name="retention_files_days" value="{{f_days}}">
+    <h2 style="margin-top:0;">系统设置</h2>
+    <form method="post" action="/admin/settings" class="grid2">
+      <div>
+        <label>订单保留天</label><input class="input" name="retention_orders_days" value="{{o_days}}">
+        <label>PDF保留天</label><input class="input" name="retention_files_days" value="{{f_days}}">
+      </div>
+      <div>
+        <label>服务端版本</label><input class="input" name="server_version" value="{{server_version}}">
+        <label>推荐客户端</label><input class="input" name="client_recommend" value="{{client_recommend}}">
+      </div>
+      <div style="grid-column:1/-1"><button class="btn primary" type="submit">保存</button></div>
+    </form>
   </div>
-  <div class="card">
-    <label>服务端版本</label><input name="server_version" value="{{server_version}}">
-    <label>推荐客户端</label><input name="client_recommend" value="{{client_recommend}}">
-  </div>
-  <div style="grid-column:1/-1"><button type="submit">保存</button></div>
-</form>
-{% endblock %}
+</div>
