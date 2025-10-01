@@ -1,0 +1,21 @@
+{% include "_nav.html" %}
+<div class="container">
+  <div class="card">
+    <h2 style="margin-top:0;">概览</h2>
+    <ul class="stats">
+      <li>订单映射：<b>{{stats.order_count}}</b></li>
+      <li>PDF 文件：<b>{{stats.file_count}}</b></li>
+      <li>客户端：<b>{{stats.client_count}}</b></li>
+      <li>版本：<code>{{stats.version}}</code></li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="card"><h3>版本信息</h3>
+      <p>服务端版本：<code>{{stats.server_version}}</code></p>
+      <p>推荐客户端：<code>{{stats.client_recommend}}</code></p>
+    </div>
+    <div class="card"><h3>保留期</h3>
+      <p>订单保留天：{{stats.o_days}}；PDF保留天：{{stats.f_days}}</p>
+    </div>
+  </div>
+</div>
