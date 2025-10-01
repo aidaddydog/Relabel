@@ -1,62 +1,47 @@
-{% include "_nav.html" %}{% block content %}
-<h2>编辑：<code>{{path}}</code> <span class="muted">（{{cn}}）</span></h2>
-{% if request.query_params.get('saved') %}<div class="ok">已保存（已自动备份到 updates/template-backups/）。</div>{% endif %}
+{% include "_nav.html" %}
+<div class="container">
+  <h2 style="margin-top:0;">编辑：<code>{{path}}</code> <span class="muted">（{{cn}}）</span></h2>
+  {% if request.query_params.get('saved') %}<div class="ok">已保存（已自动备份到 updates/template-backups/）。</div>{% endif %}
 
-<div class="split2">
-  <div class="card editor-pane">
-    <form id="editForm" method="post" action="/admin/templates/save">
-      <input type="hidden" name="kind" value="{{kind}}">
-      <input type="hidden" name="path" value="{{path}}">
-      <textarea id="editor" name="content" class="editor" spellcheck="false">{{content}}</textarea>
-      <div class="row" style="margin-top:8px">
-        <button class="primary" type="submit">保存</button>
-        <button class="btn" id="btnSavePreview" type="button">保存并预览</button>
-        <button class="btn" id="btnPreview" type="button">预览（不保存）</button>
-        <a class="btn" href="/admin/templates">返回列表</a>
-      </div>
-    </form>
-    <div class="muted" style="margin-top:6px">
-      说明：HTML 模板右侧以“保存后的实际渲染”为准；CSS/JS 支持即时预览（不保存）。
+  <div class="split2">
+    <div class="card editor-pane">
+      <form id="editForm" method="post" action="/admin/templates/save">
+        <input type="hidden" name="kind" value="{{kind}}">
+        <input type="hidden" name="path" value="{{path}}">
+        <textarea id="editor" name="content" class="editor" spellcheck="false">{{content}}</textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" type="submit">保存</button>
+          <button class="btn" id="btnSavePreview" type="button">保存并预览</button>
+          <button class="btn" id="btnPreview" type="button">预览（不保存）</button>
+          <a class="btn" href="/admin/templates">返回列表</a>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <iframe id="preview" style="width:100%; height:70vh; border:0; background:#fff;"></iframe>
     </div>
   </div>
-
-  <div class="card">
-    <iframe id="preview" class="preview-frame" src="/admin/templates/preview?kind={{kind}}&path={{path}}&ts={{range(1)|list|length}}"></iframe>
-  </div>
 </div>
-
 <script>
-(function(){
-  const kind = "{{kind}}";
-  const path = "{{path}}";
-  const editor = document.getElementById('editor');
-  const iframe = document.getElementById('preview');
-
-  function reloadSaved() {
-    iframe.src = `/admin/templates/preview?kind=${encodeURIComponent(kind)}&path=${encodeURIComponent(path)}&ts=${Date.now()}`;
-  }
-
-  document.getElementById('btnSavePreview').addEventListener('click', function(){
-    // 提交后回到当前页，右侧自动加载保存文件
-    document.getElementById('editForm').submit();
-    setTimeout(reloadSaved, 800);
-  });
-
-  document.getElementById('btnPreview').addEventListener('click', function(){
-    const code = editor.value || '';
-    if (kind === 'static') {
-      const ext = path.split('.').pop().toLowerCase();
-      if (ext === 'css') {
-        iframe.srcdoc = `<!doctype html><meta charset="utf-8"><title>CSS 预览</title><style>${code.replace(/<\/style>/g,'<\\/style>')}</style><div style="padding:16px">CSS 已加载（仅示意，实际页面效果请保存后查看）。</div>`;
-        return;
-      } else if (ext === 'js') {
-        iframe.srcdoc = `<!doctype html><meta charset="utf-8"><title>JS 预览</title><div style="padding:16px">JS 执行如下：</div><script>${code.replace(/<\/script>/g,'<\\/script>')}</script>`;
-        return;
-      }
+const iframe = document.getElementById('preview');
+const editor = document.getElementById('editor');
+const kind = "{{kind}}"; const path = "{{path}}";
+function reloadSaved(){
+  iframe.src = `/admin/templates/preview?kind=${encodeURIComponent(kind)}&path=${encodeURIComponent(path)}&ts=${Date.now()}`;
+}
+document.getElementById('btnSavePreview').addEventListener('click', function(){
+  document.getElementById('editForm').submit();
+  setTimeout(reloadSaved, 800);
+});
+document.getElementById('btnPreview').addEventListener('click', function(){
+  const code = editor.value || '';
+  if (kind === 'static') {
+    const ext = path.split('.').pop().toLowerCase();
+    if (ext === 'css') {
+      iframe.srcdoc = `<style>${code}</style><div style="padding:20px">CSS 已载入（仅预览）</div>`;
+      return;
     }
-    // HTML：不解析 Jinja，仅做原始预览（建议保存后看右侧真实渲染）
-    iframe.srcdoc = code;
-  });
-})();
+  }
+  iframe.srcdoc = code;
+});
 </script>
-{% endblock %}
