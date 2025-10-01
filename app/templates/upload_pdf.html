@@ -1,4 +1,5 @@
-<!doctype html><html><head><meta charset="utf-8"><title>PDF导入</title></head>
+<!doctype html><html><head><meta charset="utf-8"><title>PDF导入</title>
+<link href="/static/admin.css" rel="stylesheet"></head>
 <body>
 {% include "_nav.html" %}
 <div class="container">
@@ -14,76 +15,47 @@
         <progress id="upProg" value="0" max="100"></progress>
         <div style="width:40px; text-align:right;"><span id="upPct">0%</span></div>
       </div>
+      <div class="row" style="gap:8px;">
+        <div style="width:60px; color:#cfd3da;">导入</div>
+        <progress id="apProg" value="0" max="100"></progress>
+        <div style="width:40px; text-align:right;"><span id="apPct">0%</span></div>
+      </div>
     </div>
-    <pre id="log" class="card" style="margin-top:12px; background:#0f1114;"></pre>
+    <div id="log" class="card" style="margin-top:12px;"></div>
   </div>
 </div>
 <script>
-const $ = s => document.querySelector(s);
-const log = m => { const pre=$("#log"); pre.textContent += m+"\n"; pre.scrollTop = pre.scrollHeight; };
-const btn = $("#btn");
+function $(s){ return document.querySelector(s); }
+function log(t){ const d=$("#log"); d.innerHTML += (d.innerHTML?'<br>':'') + t; }
+$("#btn").addEventListener("click", async ()=>{
+  const f = $("#zipInput").files?.[0];
+  if(!f){ alert("请选择 zip"); return; }
+  $("#uploadBox").style.display = "block";
+  $("#upProg").value = 0; $("#apProg").value = 0; $("#upPct").textContent = "0%"; $("#apPct").textContent = "0%";
+  const fd = new FormData(); fd.append("zipfile_upload", f);
+  const tmpName = await new Promise((resolve, reject)=>{
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/admin/api/upload-pdf-file");
+    xhr.upload.onprogress = (e)=>{ if(e.lengthComputable){ const pct=Math.round(e.loaded*100/e.total); $("#upPct").textContent=pct+"%"; $("#upProg").value=pct; } };
+    xhr.onload = ()=>{ try{ const j=JSON.parse(xhr.responseText||"{}"); if(xhr.status>=200&&xhr.status<300 && j.ok){ resolve(j.tmp); } else { reject(new Error(j.error||"上传失败")); } }catch(e){ reject(e); } };
+    xhr.onerror = ()=>reject(new Error("上传失败"));
+    xhr.send(fd);
+  }).catch(err=>{ alert(err.message||err); throw err; });
 
-btn.addEventListener("click", async () => {
-  const f = $("#zipInput").files[0];
-  if (!f) { alert("请选择 ZIP 文件"); return; }
-  btn.classList.add("is-loading"); btn.disabled = true;
-  $("#uploadBox").style.display = "block"; $("#upPct").textContent = "0%"; $("#upProg").value = 0;
-  $("#log").textContent = "";
-
-  try {
-    // 1) 上传
-    const fd = new FormData(); fd.append("zipfile_upload", f);
-    const tmpName = await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/admin/api/upload-pdf-file");
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const pct = Math.round(e.loaded * 100 / e.total);
-          $("#upPct").textContent = pct + "%"; $("#upProg").value = pct;
-        }
-      };
-      xhr.onload = () => {
-        try {
-          const j = JSON.parse(xhr.responseText || "{}");
-          if (xhr.status>=200 && xhr.status<300 && j.ok) resolve(j.tmp);
-          else reject(new Error("上传失败: "+xhr.status));
-        } catch(e){ reject(e); }
-      };
-      xhr.onerror = () => reject(new Error("网络错误"));
-      xhr.send(fd);
-    });
-
-    log("上传完成，开始解压/导入/重建ZIP…");
-
-    // 2) SSE 监听后端进度
-    await new Promise((resolve, reject) => {
-      const es = new EventSource(`/admin/api/apply-pdf-import?tmp=${encodeURIComponent(tmpName)}`);
-      es.onmessage = (ev) => {
-        try {
-          const d = JSON.parse(ev.data);
-          if (d.phase === "unzip" && d.total && d.done !== undefined) {
-            log(`解压进度：${d.done}/${d.total}`);
-          } else if (d.phase === "repack") {
-            log(d.msg || "正在重建ZIP…");
-          } else if (d.phase === "done") {
-            log(`完成：导入 ${d.saved || 0}，跳过 ${d.skipped || 0}`);
-            es.close();
-            alert("导入成功！");
-            window.location.href = d.redirect || "/admin/files";
-            resolve();
-          } else if (d.phase === "error") {
-            es.close(); reject(new Error(d.msg || "处理失败"));
-          }
-        } catch(e){ console.error(e); }
-      };
-      es.onerror = (e) => { es.close(); reject(new Error("SSE 连接中断")); };
-    });
-
-  } catch (e) {
-    console.error(e); alert(e.message || e);
-  } finally {
-    btn.classList.remove("is-loading"); btn.disabled = false;
-  }
+  await new Promise((resolve, reject)=>{
+    const es = new EventSource("/admin/api/upload-pdf-apply?tmp="+encodeURIComponent(tmpName));
+    let total=0, done=0;
+    es.onmessage = (ev)=>{
+      try{
+        const d = JSON.parse(ev.data||"{}");
+        if(d.phase==='read'){ total=d.total||0; }
+        else if(d.phase==='progress'){ done=d.done||0; if(total){ const pct=Math.round(done*100/total); $("#apPct").textContent = pct+"%"; $("#apProg").value=pct; } }
+        else if(d.phase==='done'){ $("#apPct").textContent = "100%"; $("#apProg").value=100; log("导入完成"); es.close(); resolve(); }
+        else if(d.phase==='error'){ log("错误："+(d.msg||"")); es.close(); reject(new Error(d.msg||"错误")); }
+      }catch(e){ console.error(e); }
+    };
+  });
+  alert("已完成导入");
 });
 </script>
 </body></html>
