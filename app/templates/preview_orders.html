@@ -1,4 +1,5 @@
-<!doctype html><html><head><meta charset="utf-8"><title>订单导入预览</title></head>
+<!doctype html><html><head><meta charset="utf-8"><title>订单导入预览</title>
+<link href="/static/admin.css" rel="stylesheet"></head>
 <body>
 {% include "_nav.html" %}
 <div class="container">
@@ -13,45 +14,33 @@
         {% endfor %}
       </table>
     </div>
+
     <div style="display:flex; gap:10px; margin-top:12px;">
-      <button id="btn" class="btn primary"><span class="spinner"></span><span>确认导入</span></button>
+      <button id="btnApply" class="btn primary"><span class="spinner"></span><span>确认写入</span></button>
+      <a class="btn" href="/admin/upload-orders">返回重选</a>
     </div>
-    <pre id="log" class="card" style="margin-top:12px; background:#0f1114;"></pre>
+
+    <div id="log" class="card" style="margin-top:12px; font-family:ui-monospace,monospace;"></div>
   </div>
 </div>
+
 <script>
-const $ = s=>document.querySelector(s);
-const log = m => { const pre=$("#log"); pre.textContent += m+"\n"; pre.scrollTop = pre.scrollHeight; };
-const btn = $("#btn");
-btn.addEventListener("click", async () => {
-  btn.classList.add("is-loading"); btn.disabled = true;
-  $("#log").textContent = "";
-  try {
-    await new Promise((resolve, reject) => {
-      const es = new EventSource("/admin/api/orders-apply");
-      es.onmessage = (ev) => {
-        const d = JSON.parse(ev.data);
-        if (d.phase === "read") {
-          log("读取完成，待导入总数："+d.total);
-        } else if (d.phase === "progress") {
-          log(`写入进度：${d.done}/${d.total}`);
-        } else if (d.phase === "done") {
-          log(`导入完成：${d.count}`);
-          es.close();
-          alert("导入成功！");
-          window.location.href = d.redirect || "/admin/orders";
-          resolve();
-        } else if (d.phase === "error") {
-          es.close(); reject(new Error(d.msg || "导入失败"));
-        }
-      };
-      es.onerror = () => { es.close(); reject(new Error("SSE 连接中断")); };
-    });
-  } catch(e) {
-    alert(e.message || e);
-  } finally {
-    btn.classList.remove("is-loading"); btn.disabled = false;
-  }
+const token = "{{ token }}";
+const order_col = "{{ order_col }}";
+const tracking_col = "{{ tracking_col }}";
+function log(s){ const d=document.getElementById('log'); d.innerHTML += (d.innerHTML?'<br>':'') + s; }
+document.getElementById('btnApply').addEventListener('click', ()=>{
+  const btn = document.getElementById('btnApply'); btn.classList.add('is-loading'); btn.disabled = true;
+  const es = new EventSource(`/admin/api/orders-apply?token=${encodeURIComponent(token)}&order_col=${encodeURIComponent(order_col)}&tracking_col=${encodeURIComponent(tracking_col)}`);
+  es.onmessage = (ev)=>{
+    try{
+      const d = JSON.parse(ev.data||"{}");
+      if(d.phase==='read'){ log('读取完成，待导入总数：'+d.total); }
+      else if(d.phase==='progress'){ log(`写入进度：${d.done}/${d.total}`); }
+      else if(d.phase==='done'){ log(`导入完成：${d.count}`); es.close(); btn.classList.remove('is-loading'); btn.disabled=false; }
+      else if(d.phase==='error'){ log('错误：'+(d.msg||'')); es.close(); btn.classList.remove('is-loading'); btn.disabled=false; }
+    }catch(e){ console.error(e); }
+  };
 });
 </script>
 </body></html>
