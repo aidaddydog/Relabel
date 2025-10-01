@@ -1,84 +1,52 @@
 {% include "_nav.html" %}
-{% block content %}
-<h2>PDF 列表</h2>
-<form method="post" action="/admin/reconcile" class="row" onsubmit="return confirm('对齐文件夹与列表？这会规范化文件名并补登记缺失项。')">
-  <button type="submit" class="primary">对齐文件夹与列表</button>
-</form>
-<form method="get" class="row">
-  <input name="q" value="{{q or ''}}" placeholder="按运单搜索">
-  <select name="status">
-    <option value="" {{ 'selected' if not status }}>全部状态</option>
-    <option value="not_printed" {{ 'selected' if status=='not_printed' }}>未打印</option>
-    <option value="printed" {{ 'selected' if status=='printed' }}>已打印</option>
-    <option value="reprinted" {{ 'selected' if status=='reprinted' }}>重复打印</option>
-  </select>
-  <input name="client" value="{{client or ''}}" placeholder="按客户端搜索">
-  <select name="bind" title="绑定状态">
-    <option value="" {{ 'selected' if not bind }}>全部绑定</option>
-    <option value="bound" {{ 'selected' if bind=='bound' }}>已绑定</option>
-    <option value="unbound" {{ 'selected' if bind=='unbound' }}>未绑定</option>
-  </select>
-  <button type="submit">筛选</button>
-  <a class="primary" style="margin-left:12px" href="/admin/files/export-xlsx?q={{q or ''}}&status={{status or ''}}&client={{client or ''}}&bind={{bind or ''}}">导出Excel（追踪号+订单号）</a>
-</form>
+<div class="container">
+  <div class="card">
+    <h2 style="margin-top:0;">PDF 列表</h2>
+    <form method="post" action="/admin/reconcile" class="row" onsubmit="return confirm('对齐文件夹与列表？这会规范化文件名并补登记缺失项。')">
+      <button type="submit" class="btn primary">对齐文件夹与列表</button>
+    </form>
+    <form method="get" class="row">
+      <input class="input" name="q" value="{{q or ''}}" placeholder="按运单搜索">
+      <select name="status" class="select">
+        <option value="" {{ 'selected' if not status }}>全部状态</option>
+        <option value="not_printed" {{ 'selected' if status=='not_printed' }}>未打印</option>
+        <option value="printed" {{ 'selected' if status=='printed' }}>已打印</option>
+        <option value="reprinted" {{ 'selected' if status=='reprinted' }}>重复打印</option>
+      </select>
+      <input class="input" name="client" value="{{client or ''}}" placeholder="按客户端搜索">
+      <select name="bind" class="select" title="绑定状态">
+        <option value="" {{ 'selected' if not bind }}>全部</option>
+        <option value="bound" {{ 'selected' if bind=='bound' }}>已绑定订单</option>
+        <option value="unbound" {{ 'selected' if bind=='unbound' }}>未绑定</option>
+      </select>
+      <button class="btn" type="submit">查询</button>
+      <a class="btn" style="margin-left:12px" href="/admin/files/export-xlsx">导出Excel</a>
+    </form>
 
-<table class="table">
-  <thead>
-    <tr>
-      <th>#</th>
-      <th>PDF（导出名）</th>
-      <th>订单号</th>
-      <th>上传时间</th>
-      <th>打印状态</th>
-      <th>打印次数</th>
-      <th>打印客户端名称</th>
-      <th>操作</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for r in rows %}
-    {% set tn = r.tracking_no %}
-    {% set ex = (extras.get(tn) or {}) %}
-    {% set order_id = ex.get('order_id') or '' %}
-    {% set st = ex.get('status_cn') or '未打印' %}
-    {% set reason = ex.get('reprint_reason') or '' %}
-    <tr>
-      <td>{{loop.index + (page-1)*page_size}}</td>
-      <td>{{tn}}.pdf</td>
-      <td>{{order_id or '—'}}</td>
-      <td>{{r.uploaded_at}}</td>
-      <td>
-        {% if r.print_status == 'reprinted' %}
-          {% if reason and order_id %}
-            重复打印：{{reason}}（{{order_id}}）
-          {% elif order_id %}
-            重复打印（{{order_id}}）
-          {% elif reason %}
-            重复打印：{{reason}}
-          {% else %}
-            重复打印
-          {% endif %}
-        {% elif r.print_status == 'printed' %}
-          已打印
-        {% else %}
-          未打印
+    <table class="table">
+      <thead><tr><th>#</th><th>文件名</th><th>订单号</th><th>上传时间</th><th>打印状态</th><th>最近客户端</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+      {% set tn = r.tracking_no %}
+      {% set ex = (extras.get(tn) or {}) %}
+      <tr>
+        <td>{{ loop.index + (page-1)*page_size }}</td>
+        <td>{{ tn }}.pdf</td>
+        <td>{{ ex.get('order_id') or '—' }}</td>
+        <td>{{ r.uploaded_at }}</td>
+        <td>{{ ex.get('status_cn') }}</td>
+        <td>{{ r.last_print_client_name or '—' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="pager">
+      {% for p in range(1, pages+1) %}
+        {% if p==page %}<b>{{p}}</b>{% else %}
+        <a href="?page={{p}}&q={{q or ''}}&status={{status or ''}}&client={{client or ''}}&bind={{bind or ''}}">{{p}}</a>
         {% endif %}
-      </td>
-      <td>{{r.print_count or 0}}</td>
-      <td>{{r.last_print_client_name or ''}}</td>
-      <td><a href="/admin/file/{{tn}}" target="_blank">下载</a></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-
-<div class="pager">
-  {% for p in range(1, pages+1) %}
-    {% if p==page %}
-      <b>{{p}}</b>
-    {% else %}
-      <a href="?page={{p}}&q={{q or ''}}&status={{status or ''}}&client={{client or ''}}&bind={{bind or ''}}">{{p}}</a>
-    {% endif %}
-  {% endfor %}
+      {% endfor %}
+    </div>
+  </div>
 </div>
-{% endblock %}
