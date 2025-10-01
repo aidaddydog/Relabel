@@ -1,9 +1,0 @@
-{% include "_nav.html" %}{% block content %}
-<h2>初始化管理员</h2>
-{% if error %}<div class="alert" style="margin-bottom:10px;">{{ error }}</div>{% endif %}
-<form method="post">
-  <label>用户名</label><input class="input" name="username" required>
-  <label>密码</label><input class="input" name="password" type="password" required>
-  <button class="btn primary" type="submit"><span class="spinner"></span><span>创建</span></button>
-</form>
-{% endblock %}
