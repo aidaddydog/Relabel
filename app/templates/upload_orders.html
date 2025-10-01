@@ -1,9 +1,11 @@
 {% include "_nav.html" %}
-{% block content %}
-<h2>上传 Excel/CSV（步骤1/3：选择文件）</h2>
-{% if err %}<div class="err">{{err}}</div>{% endif %}
-<form method="post" action="/admin/upload-orders-step1" enctype="multipart/form-data">
-  <input type="file" name="file" required>
-  <button type="submit">上传并预览</button>
-</form>
-{% endblock %}
+<div class="container">
+  <div class="card" style="max-width:720px;margin:0 auto;">
+    <h2 style="margin-top:0;">上传 Excel/CSV（步骤1/3：选择文件）</h2>
+    {% if err %}<div class="err">{{err}}</div>{% endif %}
+    <form method="post" action="/admin/upload-orders-step1" enctype="multipart/form-data">
+      <input type="file" name="file" required>
+      <button class="btn primary" type="submit"><span class="spinner"></span><span>上传并预览</span></button>
+    </form>
+  </div>
+</div>
