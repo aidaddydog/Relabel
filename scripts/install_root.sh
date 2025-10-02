@@ -1,4 +1,3 @@
-path: scripts/install_root.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -75,8 +74,9 @@ echo "[*] Running Alembic migrations..."
 alembic upgrade head
 
 echo "[*] Seeding data..."
-# 注意：这里修正了种子脚本路径（从 scripts/dev_seed.py 改为 ../../scripts/dev_seed.py）
-RELABEL_ADMIN_PASSWORD="$ADMIN_PASS" RELABEL_CLIENT_CODE="123456" \
+# 关键：给 dev_seed.py 注入 PYTHONPATH，并传入管理员用户名/密码与客户端码
+PYTHONPATH="$RELABEL_BASE/apps/server" \
+RELABEL_ADMIN_USER="$ADMIN_USER" RELABEL_ADMIN_PASSWORD="$ADMIN_PASS" RELABEL_CLIENT_CODE="123456" \
 python ../../scripts/dev_seed.py || true
 
 echo "[*] Building frontend..."
@@ -87,7 +87,11 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 cd "$RELABEL_BASE/apps/web"
 npm config set registry https://registry.npmmirror.com
-npm ci || npm i
+if [ -f package-lock.json ]; then
+  npm ci
+else
+  npm i
+fi
 npm run build
 cd "$RELABEL_BASE/apps/server"
 
