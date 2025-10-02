@@ -1,4 +1,4 @@
-
+path: scripts/install_root.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -53,7 +53,7 @@ done
 echo "[*] Installing OS packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y git python3 python3-venv python3-pip build-essential libpq-dev postgresql postgresql-contrib unzip p7zip-full
+apt-get install -y git python3 python3-venv python3-pip build-essential libpq-dev postgresql postgresql-contrib unzip p7zip-full curl ca-certificates
 
 echo "[*] Preparing directories..."
 mkdir -p "$RELABEL_BASE" "$RELABEL_DATA" "$RELABEL_BASE/runtime" "$RELABEL_BASE/templates_ext"
@@ -63,7 +63,7 @@ echo "[*] Creating Python venv..."
 cd "$RELABEL_BASE/apps/server"
 python3 -m venv .venv
 . .venv/bin/activate
-pip install --upgrade pip
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 echo "[*] Configuring Postgres..."
@@ -75,7 +75,21 @@ echo "[*] Running Alembic migrations..."
 alembic upgrade head
 
 echo "[*] Seeding data..."
-RELABEL_ADMIN_PASSWORD="$ADMIN_PASS" RELABEL_CLIENT_CODE="123456" python scripts/dev_seed.py || true
+# 注意：这里修正了种子脚本路径（从 scripts/dev_seed.py 改为 ../../scripts/dev_seed.py）
+RELABEL_ADMIN_PASSWORD="$ADMIN_PASS" RELABEL_CLIENT_CODE="123456" \
+python ../../scripts/dev_seed.py || true
+
+echo "[*] Building frontend..."
+# 自动安装 Node.js 20 并构建 Vite 前端
+if ! command -v node >/dev/null 2>&1; then
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  apt-get install -y nodejs
+fi
+cd "$RELABEL_BASE/apps/web"
+npm config set registry https://registry.npmmirror.com
+npm ci || npm i
+npm run build
+cd "$RELABEL_BASE/apps/server"
 
 echo "[*] Writing environment file..."
 mkdir -p /etc/relabel
