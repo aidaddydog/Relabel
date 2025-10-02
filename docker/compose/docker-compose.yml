@@ -1,0 +1,43 @@
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: relabel
+      POSTGRES_PASSWORD: relabel
+      POSTGRES_DB: relabel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relabel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.server
+    environment:
+      DATABASE_URL: postgresql+psycopg://relabel:relabel@db:5432/relabel
+      RELABEL_BASE: /app
+      RELABEL_DATA: /app/data
+      HOST: 0.0.0.0
+      PORT: 8000
+      RELABEL_PEPPER: dev-pepper
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../apps/server:/app
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.web
+    ports:
+      - "5173:80"
+
+volumes:
+  pgdata:

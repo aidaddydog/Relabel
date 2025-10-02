@@ -1,0 +1,31 @@
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: relabel
+      POSTGRES_PASSWORD: relabel
+      POSTGRES_DB: relabel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relabel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    image: relabel/server:latest
+    environment:
+      DATABASE_URL: postgresql+psycopg://relabel:relabel@db:5432/relabel
+      RELABEL_BASE: /app
+      RELABEL_DATA: /app/data
+      HOST: 0.0.0.0
+      PORT: 8000
+    depends_on:
+      - db
+    ports:
+      - "80:8000"
+
+volumes:
+  pgdata:
