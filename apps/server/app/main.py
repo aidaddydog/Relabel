@@ -1,6 +1,6 @@
-
+path: apps/server/app/main.py
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,11 @@ app.include_router(admin_api_router)
 app.include_router(update_tpl_router)
 app.include_router(pages_router)
 
-# Static frontend (built dist)
+# ---- Frontend static mounts ----
+# Vite 构建产物默认引用 /assets/...，因此必须挂载 /assets 目录；
+# 同时保留 /static 以兼容可能的相对资源引用。
 if os.path.isdir(settings.FRONTEND_DIST):
+    assets_dir = os.path.join(settings.FRONTEND_DIST, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir, html=False), name="assets")
     app.mount("/static", StaticFiles(directory=settings.FRONTEND_DIST, html=False), name="static")
