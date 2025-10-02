@@ -74,24 +74,27 @@ echo "[*] Running Alembic migrations..."
 alembic upgrade head
 
 echo "[*] Seeding data..."
-# 关键：给 dev_seed.py 注入 PYTHONPATH，并传入管理员用户名/密码与客户端码
+# 确保可 import app.* ，并按环境变量写入管理员与默认客户端码
 PYTHONPATH="$RELABEL_BASE/apps/server" \
 RELABEL_ADMIN_USER="$ADMIN_USER" RELABEL_ADMIN_PASSWORD="$ADMIN_PASS" RELABEL_CLIENT_CODE="123456" \
 python ../../scripts/dev_seed.py || true
 
 echo "[*] Building frontend..."
-# 自动安装 Node.js 20 并构建 Vite 前端
+# 安装 Node.js 20（如未安装）
 if ! command -v node >/dev/null 2>&1; then
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   apt-get install -y nodejs
 fi
 cd "$RELABEL_BASE/apps/web"
 npm config set registry https://registry.npmmirror.com
-if [ -f package-lock.json ]; then
-  npm ci
-else
-  npm i
-fi
+
+# 统一使用 npm install（避免 lockfile 与 package.json 不一致导致 npm ci 失败）
+npm install
+
+# 强制确保 @vitejs/plugin-react 存在（首次或锁文件缺项时自动补齐）
+node -e "require('@vitejs/plugin-react')" >/dev/null 2>&1 || npm install -D @vitejs/plugin-react@^4
+
+# 构建
 npm run build
 cd "$RELABEL_BASE/apps/server"
 
